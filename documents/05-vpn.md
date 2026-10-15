@@ -10,7 +10,7 @@
 - Verbinding verloopt (time-out): controleer je internetverbinding en bevestig
   de MFA-melding binnen een minuut.
 - Aanmelden mislukt: je wachtwoord is mogelijk verlopen. Stel het opnieuw in via
-  https://aka.ms/sspr en probeer daarna opnieuw te verbinden.
+  de wachtwoordreset-pagina (aka.ms/sspr) en probeer daarna opnieuw te verbinden.
 - Wel verbonden, maar geen toegang tot netwerkmappen: herstart je laptop zodat
   de verbindingen opnieuw worden opgebouwd.
 

@@ -177,7 +177,10 @@ if (!sessionId){ sessionId = 'sess-' + Math.random().toString(36).slice(2); loca
 function esc(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function fmt(t){
   let h = esc(t).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  h = h.replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+  // markdown [tekst](url) -> één link (voorkomt dubbele weergave)
+  h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // losse URL die nog niet in een link zit
+  h = h.replace(/(^|[^"'>=])(https?:\/\/[^\s<]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
   return h;
 }
 function toBottom(){ scroll.scrollTop = scroll.scrollHeight; }

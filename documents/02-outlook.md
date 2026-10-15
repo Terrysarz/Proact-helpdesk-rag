@@ -1,7 +1,7 @@
 # Outlook werkt niet goed
 
 ## Controleer eerst Outlook in de browser
-Open https://outlook.office.com en log in met je werkaccount.
+Open Outlook op het web (outlook.office.com) en log in met je werkaccount.
 - Werkt je e-mail daar wél? Dan ligt het aan de Outlook-app op je computer; volg de stappen hieronder.
 - Werkt het daar ook niet? Dan kan het een storing zijn. Maak een ticket aan, dan kijken we ernaar.
 

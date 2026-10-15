@@ -6,7 +6,7 @@ licentie nodig, dan kan dat worden aangevraagd met goedkeuring van je
 leidinggevende. Maak hiervoor een ticket aan.
 
 ## Office-apps werken niet terwijl je wél een licentie hebt
-1. Controleer op https://www.office.com of je bij je apps kunt.
+1. Controleer op office.com of je bij je apps kunt.
 2. Meld je één keer volledig af en weer aan in de Office-apps.
 3. Een nieuwe of gewijzigde licentie kan tot ongeveer 30 minuten duren voordat
    die actief is.

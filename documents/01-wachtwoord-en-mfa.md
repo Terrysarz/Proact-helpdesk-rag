@@ -1,7 +1,7 @@
 # Wachtwoord opnieuw instellen en MFA (Microsoft 365)
 
 ## Zelf je wachtwoord opnieuw instellen
-1. Ga naar https://aka.ms/sspr.
+1. Ga naar de self-service wachtwoordreset-pagina (aka.ms/sspr).
 2. Vul je werk-e-mailadres in en bevestig de controlevraag.
 3. Kies een verificatiemethode die je eerder hebt ingesteld (de Authenticator-app,
    een sms of een alternatief e-mailadres) en voer de ontvangen code in.
@@ -15,7 +15,7 @@ ongeveer 15 minuten en probeer het daarna opnieuw.
 
 ## Multi-factor authenticatie (MFA) instellen
 1. Installeer de app "Microsoft Authenticator" op je telefoon.
-2. Ga op je computer naar https://aka.ms/mfasetup.
+2. Ga op je computer naar de MFA-instelpagina (aka.ms/mfasetup).
 3. Kies "Aanmeldingsmethode toevoegen" en volg de stappen om de app te koppelen.
 4. Bevestig de testmelding op je telefoon.
 

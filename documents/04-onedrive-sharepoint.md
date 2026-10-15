@@ -6,7 +6,7 @@ Klik op het OneDrive-icoon in de taakbalk (rechtsonder) en lees de melding.
 - Een rood kruis betekent een synchronisatiefout; volg de stappen hieronder.
 
 ## Staan je bestanden nog veilig?
-Open je bibliotheek in de browser via https://www.office.com → OneDrive of
+Open je bibliotheek in de browser via office.com → OneDrive of
 SharePoint. Zie je je bestanden daar wél, dan staan ze veilig in de cloud en gaat
 het alleen om de synchronisatie op je computer.
 

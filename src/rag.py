@@ -11,6 +11,7 @@ Nieuw: eerdere berichten uit de sessie worden meegenomen, zodat vervolgvragen
 
 from __future__ import annotations
 import json
+import re
 from functools import lru_cache
 
 from config import INDEX_PATH, TOP_K, MIN_SCORE, HISTORY_MAX
@@ -89,14 +90,43 @@ def _do_reset(identifier: str) -> dict:
     return _direct("reset", text, meta={"email_masked": r["email_masked"], "sent": r["sent"]})
 
 
-def _do_ticket(subject: str) -> dict:
-    ticket = actions.create_ticket(subject=subject)
+def _do_ticket(subject: str, details: str = "") -> dict:
+    ticket = actions.create_ticket(subject=subject, details=details)
     text = (
         f"Ik heb een ticket aangemaakt: **{ticket['id']}**\n"
         f"Onderwerp: {ticket['subject']}\n"
         f"Status: {ticket['status']}"
     )
     return _direct("ticket", text, meta={"ticket_id": ticket["id"]})
+
+
+# Strip een "maak een ticket (voor/over)"-frase om het eigenlijke onderwerp over te houden.
+_TICKET_PREFIX_RE = re.compile(
+    r"(?i)^(kun je |kan je |zou je |graag |ik wil |ik zou graag |maak |open |start |regel )*"
+    r"(een )?ticket( aanmaken| aan maken| maken| aan)?( voor| over)?\s*"
+)
+_REFERS_BACK = (
+    "net ", "zojuist", "hiervoor", "eerder", "die melding", "dat probleem", "dit probleem",
+    "nog steeds", "nogsteeds", "net vroeg", "net vrog", "die je net", "waar we het",
+)
+
+
+def _ticket_subject(msg: str, history: list[dict]) -> str:
+    """Bepaalt een zinnig ticketonderwerp: verwijst het bericht terug, pak dan het
+    vorige probleem uit het gesprek i.p.v. de letterlijke 'maak een ticket'-zin."""
+    low = msg.lower()
+    refers_back = any(w in low for w in _REFERS_BACK)
+    last_problem = ""
+    for m in reversed(history):
+        if m["role"] == "user" and router.classify(m["content"]) == "question":
+            last_problem = m["content"]
+            break
+    if refers_back and last_problem:
+        return last_problem
+    cleaned = _TICKET_PREFIX_RE.sub("", msg).strip()
+    if len(cleaned) >= 5:
+        return cleaned
+    return last_problem or msg
 
 
 # --- Hoofddispatcher --------------------------------------------------------
@@ -144,7 +174,7 @@ def prepare(message: str, session: dict | None = None) -> dict:
         )
 
     if intent == "create_ticket":
-        return _do_ticket(subject=msg)
+        return _do_ticket(subject=_ticket_subject(msg, history), details=msg)
 
     # 3) Kennisvraag -> RAG (met gespreksgeheugen).
     last_user = _last_user_message(history)

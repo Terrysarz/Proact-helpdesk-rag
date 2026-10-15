@@ -1,7 +1,7 @@
 # Microsoft Teams: geluid, camera of verbinding
 
 ## Test eerst Teams in de browser
-Open https://teams.microsoft.com en start een testgesprek. Werkt het daar wel,
+Open Teams op het web (teams.microsoft.com) en start een testgesprek. Werkt het daar wel,
 dan ligt het probleem bij de Teams-app op je computer.
 
 ## Geluid of microfoon werkt niet
