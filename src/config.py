@@ -1,42 +1,66 @@
 """
-Centrale configuratie voor de Proact Service Desk Assistant (lokale RAG-PoC).
-
-Alles staat hier bij elkaar zodat je tijdens de demo in één bestand kunt laten
-zien welke modellen en parameters je gebruikt. Pas de modelnamen hieronder aan
-op wat je in LM Studio hebt gedownload (tabblad 'My Models' / `lms ls`).
+Centrale configuratie voor de Proact Service Desk Assistant (lokale RAG-PoC v3).
 """
 
+import os
 from pathlib import Path
 
 # --- Mappen -----------------------------------------------------------------
-# BASE_DIR = de projectmap (één niveau boven /src)
 BASE_DIR = Path(__file__).resolve().parent.parent
-DOCS_DIR = BASE_DIR / "documents"          # hier staan je KB-documenten (.md/.txt)
-INDEX_PATH = BASE_DIR / "index.json"       # hier wordt de vector-index opgeslagen
+DOCS_DIR = BASE_DIR / "documents"
+INDEX_PATH = BASE_DIR / "index.json"
+DATA_DIR = BASE_DIR / "data"
+TICKETS_PATH = DATA_DIR / "tickets.json"
+ACTION_LOG_PATH = DATA_DIR / "action_log.jsonl"
 
 # --- Modellen (moeten in LM Studio geladen/gedownload zijn) -----------------
-# LLM dat de antwoorden genereert. Kies op basis van je VM-resources:
-#   - weinig RAM/geen GPU : "qwen/qwen3-1.7b" of "llama-3.2-3b-instruct"
+#   - weinig RAM/geen GPU : "qwen/qwen3-1.7b"  (sneller)
 #   - comfortabel         : "qwen/qwen3-4b-2507"
 LLM_MODEL = "qwen/qwen3-4b-2507"
-
-# Embedding-model dat tekst omzet naar vectoren. Klein en snel, draait op CPU.
 EMBEDDING_MODEL = "nomic-embed-text-v1.5"
 
 # --- RAG-parameters ---------------------------------------------------------
-CHUNK_SIZE = 800        # max. aantal tekens per chunk
-CHUNK_OVERLAP = 120     # overlap tussen chunks (behoudt context op de grens)
-TOP_K = 4               # aantal chunks dat als context wordt meegegeven
-MIN_SCORE = 0.25        # minimale similarity; eronder = "niet in de KB gevonden"
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 120
+TOP_K = 3
+MIN_SCORE = 0.35
+MAX_TOKENS = 400
+HISTORY_MAX = 8          # hoeveel berichten (user+assistant) we onthouden per sessie
+
+# --- Acties / simulatie -----------------------------------------------------
+EMAIL_DOMAIN = "proact.nl"
+RESET_LINK_VALID_MINUTES = 30
+RESET_BASE_URL = os.getenv("RESET_BASE_URL", "https://reset.proact.local/reset")
+
+# --- Echt e-mail versturen (optioneel) --------------------------------------
+# Vul deze als OMGEVINGSVARIABELEN in (nooit in de code zetten!). Zijn ze leeg,
+# dan wordt de reset-mail gesimuleerd i.p.v. echt verstuurd.
+#   export SMTP_HOST=smtp.gmail.com
+#   export SMTP_USER=jouwadres@gmail.com
+#   export SMTP_PASS=<app-wachtwoord>
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "servicedesk@proact.nl")
+SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
+EMAIL_ENABLED = bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
 
 # --- Systeemprompt ----------------------------------------------------------
-# Dwingt het model om ALLEEN uit de meegegeven context te antwoorden en eerlijk
-# te zijn als het antwoord er niet in staat. Dit voorkomt verzonnen antwoorden.
-SYSTEM_PROMPT = """Je bent de Proact Service Desk Assistant.
-Beantwoord de vraag UITSLUITEND op basis van de onderstaande context uit de
-kennisbank. Regels:
-- Staat het antwoord niet in de context? Zeg dan letterlijk: "Dat staat niet in
-  de kennisbank; maak hiervoor een ticket aan voor de Service Desk."
-- Verzin niets en gok niet.
-- Antwoord kort, concreet en in het Nederlands, bij voorkeur in stappen.
-- Noem aan het eind de bron(nen) die je hebt gebruikt."""
+# Belangrijk: het model noemt GEEN bronnen meer zelf (dat verzon het soms, bijv.
+# "04-m36" i.p.v. "04-m365"). De bronnen worden door de app toegevoegd op basis
+# van de écht opgehaalde documenten.
+SYSTEM_PROMPT = """Je bent de Proact Service Desk Assistant: een vriendelijke virtuele
+helpdesk voor eindgebruikers (klanten).
+Beantwoord de vraag UITSLUITEND op basis van de onderstaande context uit de kennisbank.
+Regels:
+- Schrijf klantgericht: vriendelijk, rustig en in duidelijke stappen, in het Nederlands.
+- Gebruik GEEN interne termen of processen (zoals teamnamen, ticketsystemen of
+  monitoringtools) in je antwoord. Praat tegen de klant, niet over de interne organisatie.
+- Staat het antwoord niet in de context? Zeg dan: "Dat kan ik hier helaas niet
+  vinden — ik kan er een ticket voor aanmaken voor de Service Desk."
+- Verzin niets en gok niet. Noem zelf GEEN bronnen of bestandsnamen. Een link mag je
+  alleen noemen als die letterlijk in de context staat; verzin nooit een link.
+- Eerdere berichten mag je gebruiken om de bedoeling te begrijpen; baseer feiten
+  uitsluitend op de context.
+- Houd het kort en behulpzaam."""

@@ -1,11 +1,10 @@
 """
-Eenvoudige terminal-chat met de Service Desk Assistant.
-Handig als snelle demo en als fallback als je geen browser wilt tonen.
+Terminal-chat met de Service Desk Assistant (niet-streamend, handig als snelle test).
 
     python src/cli.py
 """
 
-from rag import answer
+from rag import answer_once
 
 
 def main() -> None:
@@ -13,6 +12,8 @@ def main() -> None:
     print(" Proact Service Desk Assistant  (lokale RAG-PoC)")
     print(" Typ je vraag. Stop met 'exit' of 'quit'.")
     print("=" * 60)
+
+    session: dict = {}   # bewaart staat tussen berichten (reset-flow etc.)
 
     while True:
         try:
@@ -27,8 +28,8 @@ def main() -> None:
         if not question:
             continue
 
-        result = answer(question)
-        print("\nAssistant>", result["answer"])
+        result = answer_once(question, session)
+        print("\nAssistant>", result["text"])
         if result["sources"]:
             print("Bronnen:", ", ".join(result["sources"]))
 
