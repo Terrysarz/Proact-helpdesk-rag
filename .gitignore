@@ -4,3 +4,8 @@ __pycache__/
 venv/
 index.json
 data/
+ad.env
+.venv/
+__pycache__/
+data/
+index.json

@@ -19,6 +19,7 @@ from lmclient import embed, cosine_similarity, ask_llm
 import router
 import actions
 import links
+import ad
 
 _AFFIRMATIVE = {"ja", "graag", "ok", "oke", "oké", "yes", "jep", "jawel", "doe maar", "ja graag", "prima"}
 _NEGATIVE = {"nee", "niet", "laat maar", "hoeft niet", "nee bedankt", "nee hoor"}
@@ -75,11 +76,39 @@ def _direct(kind: str, text: str, sources=None, meta=None) -> dict:
 
 def _do_reset(identifier: str) -> dict:
     r = actions.request_password_reset(identifier)
-    if r["sent"]:
+
+    # Account niet gevonden (Entra ID of Active Directory).
+    if r.get("found") is False:
+        return _direct(
+            "reset",
+            f"Ik kon het account **{r['email_masked']}** niet vinden. Controleer de "
+            f"gebruikersnaam of het e-mailadres, of maak een ticket aan.",
+        )
+
+    # Active Directory (on-prem): ontgrendelen + tijdelijk wachtwoord + geforceerde wijziging.
+    if r.get("method") == "ad":
+        parts = []
+        if r.get("unlocked"):
+            parts.append("Je account is ontgrendeld.")
+        if r["sent"]:
+            parts.append(f"Er is een tijdelijk wachtwoord ingesteld en gemaild naar "
+                         f"**{r['email_masked']}** — te wijzigen bij de volgende aanmelding.")
+        else:
+            parts.append("Er is een tijdelijk wachtwoord ingesteld (te wijzigen bij de volgende "
+                         "aanmelding). Neem contact op met de Service Desk voor de inloggegevens.")
+        text = (" ".join(parts) +
+                "\n\nOm veiligheidsredenen wordt het wachtwoord nooit in de chat getoond.")
+        return _direct("reset", text, meta={"email_masked": r["email_masked"]})
+
+    extra = " Je actieve sessies zijn uit voorzorg beëindigd." if r.get("sessions_revoked") else ""
+    if r["sent"] and r.get("method") == "graph":
+        lead = (f"De wachtwoordreset is gestart voor **{r['email_masked']}**.{extra} "
+                f"Er is een reset-link gemaild.")
+    elif r["sent"]:
         lead = f"Er is een beveiligde reset-link **gemaild** naar **{r['email_masked']}**."
     elif r["simulated"]:
         lead = (f"Er is een beveiligde reset-link klaargezet voor **{r['email_masked']}** "
-                f"(gesimuleerd — e-mail is niet geconfigureerd).")
+                f"(gesimuleerd — e-mail/Graph is niet geconfigureerd).")
     else:
         lead = (f"Het versturen naar **{r['email_masked']}** is mislukt; probeer het later "
                 f"opnieuw of maak een ticket.")
@@ -88,6 +117,35 @@ def _do_reset(identifier: str) -> dict:
         "Om veiligheidsredenen wordt er nooit een wachtwoord verstuurd — alleen een reset-link."
     )
     return _direct("reset", text, meta={"email_masked": r["email_masked"], "sent": r["sent"]})
+
+
+def _handle_reset(session: dict, msg: str) -> dict:
+    """Autorisatie rond een wachtwoordreset.
+    Met AD-login: je moet ingelogd zijn en mag alleen je EIGEN account resetten
+    (agents mogen anderen). Zonder AD-login: het oude gedrag."""
+    auth = session.get("auth")
+    ident = router.extract_identifier(msg)
+
+    if ad.enabled():
+        if not auth:
+            return _direct("reset_ask",
+                           "Log eerst in (knop rechtsboven) om een wachtwoordreset te starten.")
+        self_sam = (auth.get("sam") or "").lower()
+        target = ident or self_sam
+        tgt_sam = target.lower().split("@")[0]
+        if tgt_sam and tgt_sam != self_sam and not auth.get("is_agent"):
+            return _direct("reset",
+                           "Je kunt alleen je **eigen** wachtwoord resetten. "
+                           "Vraag een Service Desk-medewerker voor een ander account.")
+        return _do_reset(target)
+
+    # Geen AD-login beschikbaar: oude gedrag.
+    if ident:
+        return _do_reset(ident)
+    session["pending"] = "password_reset"
+    return _direct("reset_ask",
+                   "Ik kan een wachtwoordreset voor je starten. Voor welk account? "
+                   "Geef je gebruikersnaam of e-mailadres.")
 
 
 def _do_ticket(subject: str, details: str = "") -> dict:
@@ -100,33 +158,133 @@ def _do_ticket(subject: str, details: str = "") -> dict:
     return _direct("ticket", text, meta={"ticket_id": ticket["id"]})
 
 
-# Strip een "maak een ticket (voor/over)"-frase om het eigenlijke onderwerp over te houden.
+# Een "maak (dan/even) een ticket (aan) (voor/over)"-frase vooraan strippen,
+# inclusief vulwoorden, om het eigenlijke onderwerp over te houden.
 _TICKET_PREFIX_RE = re.compile(
-    r"(?i)^(kun je |kan je |zou je |graag |ik wil |ik zou graag |maak |open |start |regel )*"
-    r"(een )?ticket( aanmaken| aan maken| maken| aan)?( voor| over)?\s*"
+    r"(?i)^(?:(?:kun je|kan je|zou je|graag|ik wil|ik zou graag|maak|open|start|regel|"
+    r"even|dan|maar|toch|alsjeblieft|aub|ook|nog)\s+)*"
+    r"(?:een |de |het )?ticket(?:\s+(?:aanmaken|aan maken|maken|aan))?(?:\s+(?:voor|over))?\s*"
 )
 _REFERS_BACK = (
-    "net ", "zojuist", "hiervoor", "eerder", "die melding", "dat probleem", "dit probleem",
-    "nog steeds", "nogsteeds", "net vroeg", "net vrog", "die je net", "waar we het",
+    "net ", "zojuist", "hiervoor", "ervoor", "eerder", "die melding", "dat probleem",
+    "dit probleem", "nog steeds", "nogsteeds", "net vroeg", "net vrog", "die je net",
+    "waar we het", "hierover", "hiervan",
 )
+# Trefwoorden om het laatste inhoudelijke onderwerp in het gesprek te herkennen.
+_TOPIC_WORDS = (
+    "teams", "outlook", "onedrive", "sharepoint", "wachtwoord", "password", "mfa", "vpn",
+    "printer", "printen", "afdruk", "licentie", "defender", "antivirus", "camera", "geluid",
+    "microfoon", "sync", "verbinding", "e-mail", "email", "mail", "office", "365", "entra",
+    "aanmelden", "inloggen",
+)
+_VAGUE = {"", "aan", "ervoor", "hiervoor", "hiervan", "dit", "dat", "deze", "die", "hierover"}
+
+
+def _topic_problem(history: list[dict]) -> str:
+    """Zoekt het laatste gebruikersbericht met een herkenbaar onderwerp (trefwoord),
+    anders de laatste echte vraag."""
+    for m in reversed(history):
+        if m["role"] == "user" and any(w in m["content"].lower() for w in _TOPIC_WORDS):
+            return m["content"]
+    for m in reversed(history):
+        if m["role"] == "user" and router.classify(m["content"]) == "question":
+            return m["content"]
+    return ""
 
 
 def _ticket_subject(msg: str, history: list[dict]) -> str:
-    """Bepaalt een zinnig ticketonderwerp: verwijst het bericht terug, pak dan het
-    vorige probleem uit het gesprek i.p.v. de letterlijke 'maak een ticket'-zin."""
-    low = msg.lower()
+    """Bepaalt een zinnig ticketonderwerp. Is het bericht een kaal 'maak een ticket'
+    of een terugverwijzing, pak dan het laatste onderwerp uit het gesprek."""
+    low = msg.strip().lower()
+    problem = _topic_problem(history)
     refers_back = any(w in low for w in _REFERS_BACK)
-    last_problem = ""
-    for m in reversed(history):
-        if m["role"] == "user" and router.classify(m["content"]) == "question":
-            last_problem = m["content"]
-            break
-    if refers_back and last_problem:
-        return last_problem
-    cleaned = _TICKET_PREFIX_RE.sub("", msg).strip()
-    if len(cleaned) >= 5:
-        return cleaned
-    return last_problem or msg
+    m = _TICKET_PREFIX_RE.match(low)
+    remainder = msg.strip()[m.end():].strip() if m else msg.strip()
+    rem_low = remainder.lower().strip(" .,-!?")
+    if (refers_back or rem_low in _VAGUE or len(rem_low) < 4) and problem:
+        return problem
+    if len(remainder) >= 4:
+        return remainder
+    return problem or msg
+
+
+# --- Ticket-intake: eerst info verzamelen, dan pas aanmaken ------------------
+
+_TICKET_FIELDS = [
+    ("onderwerp", "Waar gaat het ticket over? Omschrijf kort het probleem."),
+    ("naam", "Wat is je naam?"),
+    ("bedrijf", "Bij welk bedrijf of welke klantomgeving hoor je?"),
+]
+_CANCEL = {"annuleer", "annuleren", "stop", "laat maar", "laat maar zitten", "laat zitten",
+           "cancel", "niet meer", "hoeft niet", "nee", "neen"}
+
+
+def _prefill_subject(msg: str, history: list[dict]) -> str:
+    """Bruikbaar onderwerp uit bericht/gesprek; lege string als het onbekend is."""
+    low = msg.strip().lower()
+    problem = _topic_problem(history)
+    if any(w in low for w in _REFERS_BACK) and problem:
+        return problem
+    m = _TICKET_PREFIX_RE.match(low)
+    remainder = msg.strip()[m.end():].strip() if m else msg.strip()
+    rem_low = remainder.lower().strip(" .,-!?")
+    if rem_low and rem_low not in _VAGUE and len(rem_low) >= 4:
+        return remainder
+    return problem or ""
+
+
+def _next_ticket_field(t: dict):
+    for field, question in _TICKET_FIELDS:
+        if not t.get(field):
+            return field, question
+    return None, None
+
+
+def _begin_ticket(session: dict, onderwerp: str) -> dict:
+    """Start de intake: zet de staat en stel de eerste ontbrekende vraag.
+    Is de gebruiker ingelogd, dan worden naam en bedrijf automatisch overgenomen."""
+    auth = session.get("auth") or {}
+    t = {"onderwerp": onderwerp or "", "beschrijving": onderwerp or "",
+         "naam": auth.get("name", ""), "bedrijf": auth.get("company", "")}
+    session["ticket"] = t
+    field, question = _next_ticket_field(t)
+    if field is None:
+        return _finish_ticket(session)   # alles al bekend (bv. ingelogd) -> meteen aanmaken
+    if onderwerp:
+        return _direct("ticket",
+                       f"Ik ga een ticket voor je aanmaken. Ik noteer als onderwerp: "
+                       f"**{onderwerp}**.\n\n{question}")
+    return _direct("ticket", f"Prima, ik maak een ticket voor je aan.\n\n{question}")
+
+
+def _finish_ticket(session: dict) -> dict:
+    t = session.pop("ticket")
+    details = (f"Beschrijving: {t['beschrijving'] or t['onderwerp']}\n"
+               f"Naam: {t['naam']}\nBedrijf: {t['bedrijf']}")
+    ticket = actions.create_ticket(subject=t["onderwerp"], details=details)
+    text = (f"Ik heb een ticket aangemaakt: **{ticket['id']}**\n"
+            f"Onderwerp: {ticket['subject']}\n"
+            f"Naam: {t['naam']}\n"
+            f"Bedrijf: {t['bedrijf']}\n"
+            f"Status: {ticket['status']}")
+    return _direct("ticket", text, meta={"ticket_id": ticket["id"]})
+
+
+def _continue_ticket(session: dict, msg: str, low: str) -> dict:
+    """Verwerkt het antwoord op de lopende intake-vraag."""
+    if low in _CANCEL:
+        session.pop("ticket", None)
+        return _direct("info", "Oké, ik heb geen ticket aangemaakt. Kan ik iets anders doen?")
+    t = session["ticket"]
+    field, _q = _next_ticket_field(t)
+    if field:
+        t[field] = msg.strip()
+        if field == "onderwerp":
+            t["beschrijving"] = msg.strip()
+    nxt_field, nxt_q = _next_ticket_field(t)
+    if nxt_field:
+        return _direct("ticket", nxt_q)
+    return _finish_ticket(session)
 
 
 # --- Hoofddispatcher --------------------------------------------------------
@@ -136,6 +294,10 @@ def prepare(message: str, session: dict | None = None) -> dict:
     history = session.get("history", [])
     msg = message.strip()
     low = msg.lower().strip("!?. ")
+
+    # 0) Lopende ticket-intake heeft voorrang: elk bericht is een antwoord op de vraag.
+    if session.get("ticket") is not None:
+        return _continue_ticket(session, msg, low)
 
     # 1) Lopende meerstaps-flow.
     pending = session.get("pending")
@@ -147,7 +309,7 @@ def prepare(message: str, session: dict | None = None) -> dict:
     elif pending == "offer_ticket":
         session["pending"] = None
         if low in _AFFIRMATIVE:
-            return _do_ticket(session.get("last_unanswered", "Vraag via de Service Desk Assistant"))
+            return _begin_ticket(session, session.get("last_unanswered", ""))
         if low in _NEGATIVE:
             return _direct("info", "Oké, ik heb geen ticket aangemaakt. Kan ik iets anders doen?")
 
@@ -163,18 +325,10 @@ def prepare(message: str, session: dict | None = None) -> dict:
         )
 
     if intent == "password_reset":
-        ident = router.extract_identifier(msg)
-        if ident:
-            return _do_reset(ident)
-        session["pending"] = "password_reset"
-        return _direct(
-            "reset_ask",
-            "Ik kan een wachtwoordreset voor je starten. Voor welk account? "
-            "Geef je gebruikersnaam of e-mailadres.",
-        )
+        return _handle_reset(session, msg)
 
     if intent == "create_ticket":
-        return _do_ticket(subject=_ticket_subject(msg, history), details=msg)
+        return _begin_ticket(session, _prefill_subject(msg, history))
 
     # 3) Kennisvraag -> RAG (met gespreksgeheugen).
     last_user = _last_user_message(history)

@@ -9,10 +9,12 @@ v3: strakkere (Claude-achtige) interface + gespreksgeheugen.
 from __future__ import annotations
 import json
 
-from flask import Flask, request, Response, render_template_string, stream_with_context
+from flask import Flask, request, Response, render_template_string, stream_with_context, jsonify
 
 from rag import prepare, remember
 from lmclient import ask_llm_stream
+import config
+import ad
 
 app = Flask(__name__)
 SESSIONS: dict[str, dict] = {}
@@ -25,6 +27,51 @@ def sse(payload: dict) -> str:
 @app.route("/")
 def home():
     return render_template_string(PAGE)
+
+
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    session_id = (data.get("session_id") or "default").strip()
+    session = SESSIONS.setdefault(session_id, {})
+
+    if not ad.enabled():
+        return jsonify({"ok": False, "error": "Inloggen is niet beschikbaar (AD niet geconfigureerd)."})
+    try:
+        user = ad.authenticate(username, password)
+    except Exception:
+        return jsonify({"ok": False, "error": "Kan de AD-server niet bereiken."})
+    if not user:
+        return jsonify({"ok": False, "error": "Onjuiste gebruikersnaam of wachtwoord."})
+
+    is_agent = (user.get("sam", "").lower() in config.AD_AGENTS)
+    session["auth"] = {
+        "sam": user.get("sam", ""), "name": user.get("name", ""),
+        "company": user.get("company", ""), "mail": user.get("mail", ""),
+        "is_agent": is_agent,
+    }
+    return jsonify({"ok": True, "name": user.get("name") or user.get("sam"), "agent": is_agent})
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    data = request.get_json(force=True, silent=True) or {}
+    s = SESSIONS.get((data.get("session_id") or "default").strip())
+    if s:
+        s.pop("auth", None)
+    return jsonify({"ok": True})
+
+
+@app.route("/me", methods=["POST"])
+def me():
+    data = request.get_json(force=True, silent=True) or {}
+    s = SESSIONS.get((data.get("session_id") or "default").strip(), {})
+    a = s.get("auth")
+    if a:
+        return jsonify({"loggedin": True, "name": a.get("name") or a.get("sam"), "agent": a.get("is_agent")})
+    return jsonify({"loggedin": False, "login_available": ad.enabled()})
 
 
 @app.route("/chat", methods=["POST"])
@@ -143,6 +190,15 @@ PAGE = r"""
   .links{margin-top:8px; font-size:13px;}
   a{color:var(--accent); text-decoration:none;}
   a:hover{text-decoration:underline;}
+  #authbar{max-width:760px; margin:0 auto; padding:8px 20px; display:flex; justify-content:flex-end;
+           gap:8px; align-items:center; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line);}
+  #authbar form{display:flex; gap:8px; align-items:center;}
+  #authbar input{padding:6px 10px; border-radius:8px; border:1px solid var(--line);
+                 background:var(--surface); color:var(--text); font-size:13px; width:140px;}
+  #authbar button{padding:6px 12px; border:0; border-radius:8px; background:var(--accent);
+                  color:#fff; cursor:pointer; font-size:13px;}
+  #loginmsg{color:#c8871f;}
+  .agentbadge{background:var(--user); border-radius:10px; padding:1px 8px; font-size:11px;}
 </style>
 </head>
 <body>
@@ -150,6 +206,18 @@ PAGE = r"""
     <h1>Proact Service Desk Assistant</h1>
     <p>Lokale RAG-chatbot · antwoorden uit de interne kennisbank · 100% on-prem</p>
   </header>
+  <div id="authbar" style="display:none">
+    <form id="loginform">
+      <input id="u" placeholder="gebruikersnaam" autocomplete="username">
+      <input id="p" type="password" placeholder="wachtwoord" autocomplete="current-password">
+      <button type="submit">Inloggen</button>
+      <span id="loginmsg"></span>
+    </form>
+    <div id="loggedin" style="display:none">
+      Ingelogd als <strong id="whoami"></strong> <span id="agentbadge"></span>
+      · <a href="#" id="logout">uitloggen</a>
+    </div>
+  </div>
   <div id="scroll"><div id="chat">
     <div class="row bot"><div class="who">Assistent</div>
       <div class="bubble">Hoi! Vraag me iets over wachtwoorden, MFA, VPN, licenties, printers of onboarding — of laat me een wachtwoordreset starten of een ticket aanmaken.</div>
@@ -253,6 +321,45 @@ async function submit(){
   }catch(err){ row.className='row bot card error'; bubble.textContent='Verbindingsfout: '+err; }
   finally{ sendBtn.disabled=false; input.focus(); }
 }
+
+// ---- Login (optioneel, via Active Directory) ----
+const authbar=document.getElementById('authbar');
+const loginform=document.getElementById('loginform');
+const loggedin=document.getElementById('loggedin');
+const loginmsg=document.getElementById('loginmsg');
+
+async function post(url, body){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(Object.assign({session_id:sessionId}, body||{}))});
+  return r.json();
+}
+function showLoggedIn(name, agent){
+  loginform.style.display='none'; loggedin.style.display='block';
+  document.getElementById('whoami').textContent=name;
+  document.getElementById('agentbadge').innerHTML = agent ? '<span class="agentbadge">agent</span>' : '';
+  authbar.style.display='flex';
+}
+function showLoginForm(){
+  loggedin.style.display='none'; loginform.style.display='flex'; authbar.style.display='flex';
+}
+async function refreshAuth(){
+  const d=await post('/me');
+  if(d.loggedin){ showLoggedIn(d.name, d.agent); }
+  else if(d.login_available){ showLoginForm(); }
+  else { authbar.style.display='none'; }   // AD niet geconfigureerd -> geen inlogbalk
+}
+loginform.addEventListener('submit', async (e)=>{
+  e.preventDefault(); loginmsg.textContent='';
+  const u=document.getElementById('u').value.trim();
+  const p=document.getElementById('p').value;
+  const d=await post('/login',{username:u, password:p});
+  if(d.ok){ document.getElementById('p').value=''; showLoggedIn(d.name, d.agent); }
+  else { loginmsg.textContent = d.error || 'Inloggen mislukt'; }
+});
+document.getElementById('logout').addEventListener('click', async (e)=>{
+  e.preventDefault(); await post('/logout'); showLoginForm();
+});
+refreshAuth();
 </script>
 </body>
 </html>

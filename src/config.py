@@ -31,6 +31,9 @@ HISTORY_MAX = 8          # hoeveel berichten (user+assistant) we onthouden per s
 EMAIL_DOMAIN = "proact.nl"
 RESET_LINK_VALID_MINUTES = 30
 RESET_BASE_URL = os.getenv("RESET_BASE_URL", "https://reset.proact.local/reset")
+# Lab/demo: stuur reset-meldingen naar één adres (bv. je eigen inbox), omdat
+# testgebruikers geen echte mailbox hebben. Leeg = naar het adres van de gebruiker.
+RESET_NOTIFY_OVERRIDE = os.getenv("RESET_NOTIFY_OVERRIDE", "")
 
 # --- Echt e-mail versturen (optioneel) --------------------------------------
 # Vul deze als OMGEVINGSVARIABELEN in (nooit in de code zetten!). Zijn ze leeg,
@@ -45,6 +48,28 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "servicedesk@proact.nl")
 SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
 EMAIL_ENABLED = bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
+
+# --- Microsoft Graph / Entra ID (optioneel) ---------------------------------
+# Vul als omgevingsvariabelen. Als deze leeg zijn, wordt Graph niet gebruikt.
+#   export GRAPH_TENANT_ID=...      export GRAPH_CLIENT_ID=...
+#   export GRAPH_CLIENT_SECRET=...  export GRAPH_SENDER=servicedesk@jouwtenant.onmicrosoft.com
+GRAPH_TENANT_ID = os.getenv("GRAPH_TENANT_ID", "")
+GRAPH_CLIENT_ID = os.getenv("GRAPH_CLIENT_ID", "")
+GRAPH_CLIENT_SECRET = os.getenv("GRAPH_CLIENT_SECRET", "")
+GRAPH_SENDER = os.getenv("GRAPH_SENDER", "")
+
+# --- On-prem Active Directory (optioneel) -----------------------------------
+# Zie de output van scripts/02-Setup-Lab.ps1 voor de juiste waarden.
+AD_SERVER = os.getenv("AD_SERVER", "")              # bv. 192.168.2.10
+AD_PORT = int(os.getenv("AD_PORT", "636"))
+AD_USE_SSL = os.getenv("AD_USE_SSL", "true").lower() == "true"
+AD_VALIDATE_CERT = os.getenv("AD_VALIDATE_CERT", "false").lower() == "true"  # false = lab
+AD_BASE_DN = os.getenv("AD_BASE_DN", "")            # bv. DC=lab,DC=proact,DC=local
+AD_BIND_DN = os.getenv("AD_BIND_DN", "")            # DN van het serviceaccount
+AD_BIND_PASSWORD = os.getenv("AD_BIND_PASSWORD", "")
+# Gebruikersnamen (sAMAccountName) die 'agent' zijn en ook ANDERE accounts mogen
+# resetten. Komma-gescheiden, bv. "terry.sarpong". Leeg = iedereen mag alleen zichzelf.
+AD_AGENTS = [a.strip().lower() for a in os.getenv("AD_AGENTS", "").split(",") if a.strip()]
 
 # --- Systeemprompt ----------------------------------------------------------
 # Belangrijk: het model noemt GEEN bronnen meer zelf (dat verzon het soms, bijv.
