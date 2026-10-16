@@ -6,8 +6,8 @@ aantal Service Desk-handelingen zelf uitvoert. Alles draait 100% lokaal via LM S
 dus er gaat geen bedrijfsinformatie naar een externe clouddienst.
 
 Ik heb dit gemaakt als automatisering van handmatig servicedeskwerk: wachtwoorden
-resetten, accounts ontgrendelen, tickets aanmaken en software uitrollen, allemaal via
-een chatgesprek dat gekoppeld is aan Active Directory.
+resetten (waarbij het account ook wordt ontgrendeld), tickets aanmaken en software
+uitrollen, allemaal via een chatgesprek dat gekoppeld is aan Active Directory.
 
 ## Wat ik heb gebouwd
 
