@@ -25,7 +25,8 @@ _REQUEST_CUES = (
     "reset mijn", "reset me", "wil mijn", "wil een", "wil graag", "kun je mijn",
     "kun je een", "kan je mijn", "kan je een", "maak een", "open een",
     "start een", "stuur mij", "stuur me", "mijn wachtwoord resetten",
-    "wachtwoord resetten voor", "regel een", "ik wil",
+    "wachtwoord resetten voor", "regel een", "ik wil", "installeer",
+    "ik heb nodig", "heb ik nodig",
 )
 
 # Vraagwoorden wijzen op een uitlegvraag -> RAG, niet op een actie.
@@ -34,6 +35,12 @@ _QUESTION_CUES = ("hoe ", "waar ", "wat ", "waarom ", "wanneer ", "welke ", "kan
 _PW_WORDS = ("wachtwoord", "password", "inloggen", "aanmelden")
 _PW_RESET_WORDS = ("reset", "resetten", "vergeten", "kwijt", "opnieuw", "nieuw", "geblokkeerd", "vastgelopen")
 _TICKET_WORDS = ("ticket", "melding", "storing", "incident", "aanvraag")
+# Zelfservice software-uitrol (installeer/aanvragen van een applicatie).
+# Werkwoorden en concrete app-namen zijn een STERK actiesignaal (ook zonder los
+# verzoekwoord); algemene woorden ("software") hebben wél een verzoekwoord nodig.
+_SOFTWARE_VERBS = ("installeer", "installeren", "installatie", "uitrollen", "uitrol")
+_APP_HINTS = ("adobe", "acrobat", "reader", "7-zip", "7zip")
+_SOFTWARE_WORDS = _SOFTWARE_VERBS + ("software", "programma", "applicatie") + _APP_HINTS
 
 
 def _normalize(text: str) -> str:
@@ -53,8 +60,8 @@ def _looks_like_request(text: str) -> bool:
     t = _normalize(text)
     if any(cue in t for cue in _REQUEST_CUES):
         return True
-    # Een imperatief aan het begin ("reset ...", "maak ...", "open ...").
-    return bool(re.match(r"^(reset|maak|open|start|stuur|regel)\b", t))
+    # Een imperatief aan het begin ("reset ...", "maak ...", "installeer ...").
+    return bool(re.match(r"^(reset|maak|open|start|stuur|regel|installeer)\b", t))
 
 
 def classify(text: str) -> str:
@@ -67,6 +74,12 @@ def classify(text: str) -> str:
 
     is_question_phrasing = any(t.startswith(c) or (" " + c) in (" " + t) for c in _QUESTION_CUES)
     request = _looks_like_request(t)
+
+    # Software aanvragen/installeren: alleen als ACTIE bedoeld, niet als uitlegvraag.
+    if not is_question_phrasing and any(w in t for w in _SOFTWARE_WORDS):
+        strong = any(v in t for v in _SOFTWARE_VERBS) or any(a in t for a in _APP_HINTS)
+        if strong or request:
+            return "software_request"
 
     # Wachtwoordreset: alleen als ACTIE bedoeld (verzoek), niet als uitlegvraag.
     if any(w in t for w in _PW_WORDS) and any(w in t for w in _PW_RESET_WORDS):

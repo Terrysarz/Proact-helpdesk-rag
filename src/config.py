@@ -71,6 +71,30 @@ AD_BIND_PASSWORD = os.getenv("AD_BIND_PASSWORD", "")
 # resetten. Komma-gescheiden, bv. "terry.sarpong". Leeg = iedereen mag alleen zichzelf.
 AD_AGENTS = [a.strip().lower() for a in os.getenv("AD_AGENTS", "").split(",") if a.strip()]
 
+# --- Zelfservice software-uitrol --------------------------------------------
+# De gebruiker vraagt een applicatie aan; de chatbot voegt het account toe aan de
+# bijbehorende AD-groep. Een GPO met Software Installation (gefilterd op die groep)
+# rolt de applicatie vervolgens uit bij de volgende aanmelding. Geen goedkeuring
+# nodig voor licentievrije software zoals Adobe Reader.
+#   alias/vriendelijke naam (lowercase) -> naam van de AD-groep
+APP_GROUPS = {
+    "adobe reader": "App-AdobeReader",
+    "adobe acrobat reader": "App-AdobeReader",
+    "acrobat reader": "App-AdobeReader",
+    "acrobat": "App-AdobeReader",
+    "adobe": "App-AdobeReader",
+    "reader": "App-AdobeReader",
+    "7-zip": "App-7Zip",
+    "7zip": "App-7Zip",
+}
+# AD-groep -> nette weergavenaam voor in de chat.
+APP_NAMES = {
+    "App-AdobeReader": "Adobe Reader",
+    "App-7Zip": "7-Zip",
+}
+# Lijst die aan de gebruiker getoond wordt als "beschikbare software".
+APP_DISPLAY = ["Adobe Reader", "7-Zip"]
+
 # --- Systeemprompt ----------------------------------------------------------
 # Belangrijk: het model noemt GEEN bronnen meer zelf (dat verzon het soms, bijv.
 # "04-m36" i.p.v. "04-m365"). De bronnen worden door de app toegevoegd op basis

@@ -16,6 +16,7 @@ from functools import lru_cache
 
 from config import INDEX_PATH, TOP_K, MIN_SCORE, HISTORY_MAX
 from lmclient import embed, cosine_similarity, ask_llm
+import config
 import router
 import actions
 import links
@@ -146,6 +147,72 @@ def _handle_reset(session: dict, msg: str) -> dict:
     return _direct("reset_ask",
                    "Ik kan een wachtwoordreset voor je starten. Voor welk account? "
                    "Geef je gebruikersnaam of e-mailadres.")
+
+
+# --- Zelfservice software-uitrol --------------------------------------------
+
+def _extract_app(msg: str) -> str | None:
+    """Herkent welke applicatie wordt gevraagd op basis van de aliassen uit config.
+    Langste alias eerst, zodat 'adobe acrobat reader' wint van 'adobe'."""
+    t = msg.lower()
+    for alias in sorted(config.APP_GROUPS, key=len, reverse=True):
+        if alias in t:
+            return alias
+    return None
+
+
+def _do_software(session: dict, app_key: str) -> dict:
+    auth = session.get("auth") or {}
+    identifier = auth.get("sam") or auth.get("upn") or ""
+    if ad.enabled() and not identifier:
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om software aan te vragen.")
+    r = actions.request_software(identifier, app_key)
+    name = r.get("app_name") or app_key
+
+    if r.get("error") == "unknown_app":
+        return _direct("software",
+                       f"Die software ken ik niet. Beschikbaar is: {', '.join(config.APP_DISPLAY)}.")
+    if r.get("found") is False:
+        return _direct("software",
+                       "Ik kon je account niet vinden om de aanvraag te verwerken. "
+                       "Log opnieuw in of maak een ticket aan.")
+    if r.get("error") == "group_missing":
+        return _direct("software",
+                       f"De automatische uitrol voor **{name}** is nog niet ingericht. "
+                       f"Ik kan er een ticket voor aanmaken voor de Service Desk.")
+    if r.get("error"):
+        return _direct("software",
+                       f"Er ging iets mis bij het aanvragen van **{name}**. Probeer het later "
+                       f"opnieuw of maak een ticket aan.")
+    if r.get("already"):
+        return _direct("software",
+                       f"**{name}** staat al voor je klaar. Het verschijnt na je volgende "
+                       f"aanmelding; als je het nog niet ziet, meld je dan opnieuw aan.",
+                       meta={"app": name})
+    if r.get("method") == "ad" and r.get("added"):
+        return _direct("software",
+                       f"Je aanvraag voor **{name}** is verwerkt. De installatie start "
+                       f"automatisch bij je volgende aanmelding (geen licentie nodig). "
+                       f"Zie je het niet meteen? Meld je dan opnieuw aan.",
+                       meta={"app": name})
+    # Geen AD beschikbaar: nette simulatie.
+    return _direct("software",
+                   f"Je aanvraag voor **{name}** is genoteerd (demo-modus: AD niet gekoppeld).",
+                   meta={"app": name})
+
+
+def _handle_software(session: dict, msg: str) -> dict:
+    if ad.enabled() and not session.get("auth"):
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om software aan te vragen.")
+    app = _extract_app(msg)
+    if not app:
+        session["pending"] = "software_request"
+        return _direct("software_ask",
+                       f"Welke software wil je aanvragen? Beschikbaar is: "
+                       f"{', '.join(config.APP_DISPLAY)}.")
+    return _do_software(session, app)
 
 
 def _do_ticket(subject: str, details: str = "") -> dict:
@@ -312,6 +379,16 @@ def prepare(message: str, session: dict | None = None) -> dict:
             return _begin_ticket(session, session.get("last_unanswered", ""))
         if low in _NEGATIVE:
             return _direct("info", "Oké, ik heb geen ticket aangemaakt. Kan ik iets anders doen?")
+    elif pending == "software_request":
+        session["pending"] = None
+        if low in _CANCEL or low in _NEGATIVE:
+            return _direct("info", "Oké, ik heb geen software aangevraagd. Kan ik iets anders doen?")
+        app = _extract_app(msg)
+        if app:
+            return _do_software(session, app)
+        session["pending"] = "software_request"
+        return _direct("software_ask",
+                       f"Die software herken ik niet. Kies uit: {', '.join(config.APP_DISPLAY)}.")
 
     # 2) Intent.
     intent = router.classify(msg)
@@ -323,6 +400,9 @@ def prepare(message: str, session: dict | None = None) -> dict:
             "MFA, VPN, licenties, printers of onboarding — of laat me een wachtwoordreset "
             "starten of een ticket aanmaken.",
         )
+
+    if intent == "software_request":
+        return _handle_software(session, msg)
 
     if intent == "password_reset":
         return _handle_reset(session, msg)

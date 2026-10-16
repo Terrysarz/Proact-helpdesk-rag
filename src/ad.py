@@ -29,6 +29,12 @@ AD_VALIDATE_CERT = os.getenv("AD_VALIDATE_CERT", "false").lower() == "true"
 AD_BASE_DN = os.getenv("AD_BASE_DN", "")
 AD_BIND_DN = os.getenv("AD_BIND_DN", "")
 AD_BIND_PASSWORD = os.getenv("AD_BIND_PASSWORD", "")
+# true (standaard, realistisch): na een reset MOET de gebruiker het tijdelijke
+# wachtwoord wijzigen bij de volgende aanmelding. Zolang die vlag staat, weigert AD
+# een gewone LDAP-bind (dus ook de chatbot-login) tot de wijziging is gedaan.
+# Zet op false voor een demo zonder domein-client: dan werkt het tijdelijke
+# wachtwoord meteen in de chatbot (minder veilig, alleen voor de PoC-demo).
+AD_FORCE_CHANGE = os.getenv("AD_FORCE_CHANGE", "true").lower() == "true"
 
 
 def enabled() -> bool:
@@ -113,6 +119,40 @@ def unlock(dn: str) -> None:
         conn.unbind()
 
 
+def find_group(name: str) -> dict | None:
+    """Zoekt een (security-)groep op cn of sAMAccountName. None als niet gevonden.
+    Geeft dn + huidige leden terug (DN's), zodat de aanroeper dubbel lidmaatschap kan zien."""
+    from ldap3 import SUBTREE
+    cn = name.split("@")[0] if "@" in name else name
+    conn = _connect()
+    try:
+        conn.search(AD_BASE_DN,
+                    f"(&(objectClass=group)(|(cn={cn})(sAMAccountName={cn})))",
+                    search_scope=SUBTREE,
+                    attributes=["distinguishedName", "cn", "member"])
+        if not conn.entries:
+            return None
+        e = conn.entries[0]
+        members = [str(m) for m in e["member"]] if "member" in e and e["member"] else []
+        return {"dn": str(e.entry_dn),
+                "cn": str(e["cn"]) if "cn" in e and e["cn"] else cn,
+                "members": members}
+    finally:
+        conn.unbind()
+
+
+def add_to_group(user_dn: str, group_dn: str) -> None:
+    """Voegt een gebruiker toe aan een AD-groep (serviceaccount moet dit mogen).
+    Lidmaatschap van zo'n groep triggert de GPO-software-uitrol."""
+    conn = _connect()
+    try:
+        ok = conn.extend.microsoft.add_members_to_groups([user_dn], [group_dn], fix=True)
+        if ok is False:
+            raise RuntimeError(f"toevoegen aan groep mislukt: {conn.result}")
+    finally:
+        conn.unbind()
+
+
 def _gen_password(length: int = 16) -> str:
     """Genereert een sterk tijdelijk wachtwoord dat aan AD-complexiteit voldoet."""
     alphabet = string.ascii_letters + string.digits + "!@#$%?-"
@@ -131,9 +171,10 @@ def reset_to_temp(dn: str) -> str:
     conn = _connect()
     try:
         conn.extend.microsoft.modify_password(dn, temp)        # nieuw (tijdelijk) wachtwoord
-        conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})  # 0 = wijzigen bij volgende logon
-        if not conn.result or conn.result.get("result") not in (0, None):
-            raise RuntimeError(f"pwdLastSet zetten mislukt: {conn.result}")
+        if AD_FORCE_CHANGE:
+            conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})  # 0 = wijzigen bij volgende logon
+            if not conn.result or conn.result.get("result") not in (0, None):
+                raise RuntimeError(f"pwdLastSet zetten mislukt: {conn.result}")
         return temp
     finally:
         conn.unbind()
