@@ -216,7 +216,7 @@ def _handle_software(session: dict, msg: str) -> dict:
 
 
 def _do_ticket(subject: str, details: str = "") -> dict:
-    ticket = actions.create_ticket(subject=subject, details=details)
+    ticket = actions.create_ticket(subject=subject, description=details)
     text = (
         f"Ik heb een ticket aangemaakt: **{ticket['id']}**\n"
         f"Onderwerp: {ticket['subject']}\n"
@@ -278,9 +278,12 @@ def _ticket_subject(msg: str, history: list[dict]) -> str:
 # --- Ticket-intake: eerst info verzamelen, dan pas aanmaken ------------------
 
 _TICKET_FIELDS = [
-    ("onderwerp", "Waar gaat het ticket over? Omschrijf kort het probleem."),
+    ("onderwerp", "Geef kort het onderwerp van je melding (bijv. 'PowerPoint start niet')."),
+    ("beschrijving", "Omschrijf het probleem wat uitgebreider: wat gebeurt er precies, "
+                     "sinds wanneer, en is er een foutmelding?"),
     ("naam", "Wat is je naam?"),
     ("bedrijf", "Bij welk bedrijf of welke klantomgeving hoor je?"),
+    ("telefoon", "Op welk telefoonnummer kunnen we je bereiken? (bijv. 06-12345678)"),
 ]
 _CANCEL = {"annuleer", "annuleren", "stop", "laat maar", "laat maar zitten", "laat zitten",
            "cancel", "niet meer", "hoeft niet", "nee", "neen"}
@@ -311,8 +314,9 @@ def _begin_ticket(session: dict, onderwerp: str) -> dict:
     """Start de intake: zet de staat en stel de eerste ontbrekende vraag.
     Is de gebruiker ingelogd, dan worden naam en bedrijf automatisch overgenomen."""
     auth = session.get("auth") or {}
-    t = {"onderwerp": onderwerp or "", "beschrijving": onderwerp or "",
-         "naam": auth.get("name", ""), "bedrijf": auth.get("company", "")}
+    t = {"onderwerp": onderwerp or "", "beschrijving": "",
+         "naam": auth.get("name", ""), "bedrijf": auth.get("company", ""),
+         "telefoon": ""}
     session["ticket"] = t
     field, question = _next_ticket_field(t)
     if field is None:
@@ -326,15 +330,24 @@ def _begin_ticket(session: dict, onderwerp: str) -> dict:
 
 def _finish_ticket(session: dict) -> dict:
     t = session.pop("ticket")
-    details = (f"Beschrijving: {t['beschrijving'] or t['onderwerp']}\n"
-               f"Naam: {t['naam']}\nBedrijf: {t['bedrijf']}")
-    ticket = actions.create_ticket(subject=t["onderwerp"], details=details)
-    text = (f"Ik heb een ticket aangemaakt: **{ticket['id']}**\n"
-            f"Onderwerp: {ticket['subject']}\n"
-            f"Naam: {t['naam']}\n"
-            f"Bedrijf: {t['bedrijf']}\n"
-            f"Status: {ticket['status']}")
-    return _direct("ticket", text, meta={"ticket_id": ticket["id"]})
+    auth = session.get("auth") or {}
+    ticket = actions.create_ticket(
+        subject=t["onderwerp"],
+        description=t.get("beschrijving") or t["onderwerp"],
+        naam=t.get("naam", ""), bedrijf=t.get("bedrijf", ""),
+        telefoon=t.get("telefoon", ""),
+    )
+    mail = actions.send_ticket_email(ticket, identifier=auth.get("sam", ""),
+                                     user_mail=auth.get("mail", ""))
+    lines = [f"Ik heb een ticket aangemaakt: **{ticket['id']}**",
+             f"Onderwerp: {ticket['subject']}",
+             f"Naam: {ticket['naam']}",
+             f"Bedrijf: {ticket['bedrijf']}",
+             f"Telefoon: {ticket['telefoon']}",
+             f"Status: {ticket['status']}"]
+    if mail.get("sent"):
+        lines.append(f"\nEen bevestiging is gemaild naar **{mail['email_masked']}**.")
+    return _direct("ticket", "\n".join(lines), meta={"ticket_id": ticket["id"]})
 
 
 def _continue_ticket(session: dict, msg: str, low: str) -> dict:
@@ -346,8 +359,6 @@ def _continue_ticket(session: dict, msg: str, low: str) -> dict:
     field, _q = _next_ticket_field(t)
     if field:
         t[field] = msg.strip()
-        if field == "onderwerp":
-            t["beschrijving"] = msg.strip()
     nxt_field, nxt_q = _next_ticket_field(t)
     if nxt_field:
         return _direct("ticket", nxt_q)

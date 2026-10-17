@@ -74,19 +74,61 @@ def to_email(identifier: str) -> str:
     return identifier if "@" in identifier else f"{identifier}@{config.EMAIL_DOMAIN}"
 
 
-def create_ticket(subject: str, details: str = "") -> dict:
+def create_ticket(subject: str, description: str = "", naam: str = "",
+                  bedrijf: str = "", telefoon: str = "") -> dict:
     tickets = _load_tickets()
     ticket = {
         "id": f"PRO-{len(tickets) + 1:05d}",
         "created": _now_iso(),
         "subject": subject.strip() or "Onbekend onderwerp",
-        "details": details.strip(),
+        "description": description.strip(),
+        "naam": naam.strip(),
+        "bedrijf": bedrijf.strip(),
+        "telefoon": telefoon.strip(),
         "status": "open",
     }
     tickets.append(ticket)
     _save_tickets(tickets)
     _log_action("create_ticket", {"ticket_id": ticket["id"], "subject": ticket["subject"]})
     return ticket
+
+
+def _ticket_body(ticket: dict) -> str:
+    """Nette bevestigingsmail van een aangemaakt ticket (lab/PoC)."""
+    return (
+        f"Hallo {ticket.get('naam') or 'collega'},\n\n"
+        "Bedankt voor je melding. De Service Desk heeft een ticket voor je aangemaakt.\n\n"
+        f"Ticketnummer : {ticket['id']}\n"
+        f"Onderwerp    : {ticket['subject']}\n"
+        f"Omschrijving : {ticket.get('description') or ticket['subject']}\n"
+        f"Naam         : {ticket.get('naam', '')}\n"
+        f"Bedrijf      : {ticket.get('bedrijf', '')}\n"
+        f"Telefoon     : {ticket.get('telefoon', '')}\n"
+        f"Aangemaakt   : {ticket['created']}\n"
+        f"Status       : {ticket['status']}\n\n"
+        "Een medewerker neemt dit zo snel mogelijk op. Verwijs bij vragen naar het ticketnummer.\n\n"
+        "Proact Service Desk Assistant (PoC)\n"
+    )
+
+
+def send_ticket_email(ticket: dict, identifier: str = "", user_mail: str = "") -> dict:
+    """Stuurt (als SMTP is ingesteld) een bevestigingsmail van het ticket naar het
+    geregistreerde adres. Geeft een veilige samenvatting terug; is SMTP niet ingesteld,
+    dan gebeurt er niets (sent=False)."""
+    result = {"sent": False, "email_masked": "", "error": None}
+    if not config.EMAIL_ENABLED:
+        return result
+    recipient = _notify_recipient(identifier or ticket.get("naam", ""), user_mail)
+    result["email_masked"] = mask_email(recipient)
+    try:
+        _smtp_send(recipient, f"Ticket {ticket['id']} aangemaakt - {ticket['subject']}",
+                   _ticket_body(ticket))
+        result["sent"] = True
+    except Exception as e:
+        result["error"] = str(e)
+    _log_action("ticket_email", {"ticket_id": ticket["id"], "sent": result["sent"],
+                                 "error": result["error"]})
+    return result
 
 
 def _smtp_send(to_addr: str, subject: str, body: str) -> None:
