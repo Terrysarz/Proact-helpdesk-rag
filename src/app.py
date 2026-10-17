@@ -118,8 +118,8 @@ def chat():
                                                         "Is het antwoordmodel geladen in LM Studio?"})
                     yield sse({"type": "done"})
                     return
-            if plan.get("sources"):
-                yield sse({"type": "sources", "sources": plan["sources"]})
+            # Interne bronbestanden (bv. 02-outlook.md) tonen we NIET aan de klant.
+            # De nette, publieke 'Meer info'-link hieronder blijft wel staan.
             if plan.get("links"):
                 yield sse({"type": "links", "links": plan["links"]})
 
@@ -303,11 +303,6 @@ async function submit(){
             row.className='row bot card '+k;
           }
           render();
-        }
-        else if(ev.type==='sources'){
-          const s=document.createElement('div'); s.className='sources';
-          s.textContent='Bronnen: '+ev.sources.join(', ');
-          bubble.appendChild(s); toBottom();
         }
         else if(ev.type==='links'){
           const b=document.createElement('div'); b.className='links';

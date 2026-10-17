@@ -16,8 +16,11 @@ ACTION_LOG_PATH = DATA_DIR / "action_log.jsonl"
 # --- Modellen (moeten in LM Studio geladen/gedownload zijn) -----------------
 #   - weinig RAM/geen GPU : "qwen/qwen3-1.7b"  (sneller)
 #   - comfortabel         : "qwen/qwen3-4b-2507"
-LLM_MODEL = "qwen/qwen3-4b-2507"
-EMBEDDING_MODEL = "nomic-embed-text-v1.5"
+# Instelbaar via omgevingsvariabele, zodat je van model kunt wisselen zonder de code
+# aan te passen. De naam moet exact overeenkomen met wat LM Studio toont (zie: lms ls).
+#   export LLM_MODEL="qwen/qwen3-8b"
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3-8b")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text-v1.5")
 
 # --- RAG-parameters ---------------------------------------------------------
 CHUNK_SIZE = 800
@@ -84,16 +87,13 @@ APP_GROUPS = {
     "acrobat": "App-AdobeReader",
     "adobe": "App-AdobeReader",
     "reader": "App-AdobeReader",
-    "7-zip": "App-7Zip",
-    "7zip": "App-7Zip",
 }
 # AD-groep -> nette weergavenaam voor in de chat.
 APP_NAMES = {
     "App-AdobeReader": "Adobe Reader",
-    "App-7Zip": "7-Zip",
 }
 # Lijst die aan de gebruiker getoond wordt als "beschikbare software".
-APP_DISPLAY = ["Adobe Reader", "7-Zip"]
+APP_DISPLAY = ["Adobe Reader"]
 
 # --- Systeemprompt ----------------------------------------------------------
 # Belangrijk: het model noemt GEEN bronnen meer zelf (dat verzon het soms, bijv.
@@ -102,15 +102,34 @@ APP_DISPLAY = ["Adobe Reader", "7-Zip"]
 SYSTEM_PROMPT = """Je bent de Proact Service Desk Assistant: een vriendelijke virtuele
 helpdesk voor eindgebruikers (klanten).
 Beantwoord de vraag UITSLUITEND op basis van de onderstaande context uit de kennisbank.
-Regels:
+
+Denk eerst mee met de klant voordat je antwoordt:
+- Lees goed wat de klant AL heeft verteld of geprobeerd, ook in eerdere berichten, en
+  speel daarop in. Ga uit van wat de klant zegt.
+- Stel nooit voor om iets te controleren of te proberen wat de klant net al heeft gemeld.
+  Zegt de klant bijvoorbeeld dat inloggen op de webversie niet lukt, ga daar dan vanuit
+  en geef meteen de stap die daarbij hoort; stuur de klant niet terug om datzelfde opnieuw
+  te doen.
+- Kies de ene of twee stappen die echt bij deze situatie passen. Som geen hele lijst met
+  mogelijkheden op.
+- Herhaal niet je vorige antwoord. Komt de vraag in de kern op hetzelfde neer als daarvoor,
+  breng het dan verder: geef de volgende logische stap, stel EEN gerichte vervolgvraag, of
+  bied aan een ticket aan te maken.
+- Weet je op basis van de context niet genoeg om verder te helpen, blijf dan niet herhalen
+  maar bied een ticket aan.
+
+Schrijfstijl en regels:
 - Schrijf klantgericht: vriendelijk, rustig en in duidelijke stappen, in het Nederlands.
+- Begin niet elk antwoord met een groet; een groet hoort alleen bij het eerste contact.
 - Gebruik GEEN interne termen of processen (zoals teamnamen, ticketsystemen of
   monitoringtools) in je antwoord. Praat tegen de klant, niet over de interne organisatie.
-- Staat het antwoord niet in de context? Zeg dan: "Dat kan ik hier helaas niet
-  vinden — ik kan er een ticket voor aanmaken voor de Service Desk."
+- Staat het antwoord niet in de context? Zeg dan: "Dat kan ik hier helaas niet vinden. Ik
+  kan er wel een ticket voor aanmaken voor de Service Desk."
 - Verzin niets en gok niet. Noem zelf GEEN bronnen of bestandsnamen.
 - Noem GEEN volledige webadressen (geen https://) en GEEN markdown-links. Verwijs
   hooguit naar de naam van een pagina; de officiële link wordt automatisch toegevoegd.
 - Eerdere berichten mag je gebruiken om de bedoeling te begrijpen; baseer feiten
   uitsluitend op de context.
+- Gebruik nooit een gedachtestreepje (het teken "—"). Gebruik in plaats daarvan een komma,
+  een punt of een dubbele punt.
 - Houd het kort en behulpzaam."""

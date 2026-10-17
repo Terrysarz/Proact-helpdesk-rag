@@ -93,7 +93,7 @@ def _do_reset(identifier: str) -> dict:
             parts.append("Je account is ontgrendeld.")
         if r["sent"]:
             parts.append(f"Er is een tijdelijk wachtwoord ingesteld en gemaild naar "
-                         f"**{r['email_masked']}** — te wijzigen bij de volgende aanmelding.")
+                         f"**{r['email_masked']}**, te wijzigen bij de volgende aanmelding.")
         else:
             parts.append("Er is een tijdelijk wachtwoord ingesteld (te wijzigen bij de volgende "
                          "aanmelding). Neem contact op met de Service Desk voor de inloggegevens.")
@@ -109,13 +109,13 @@ def _do_reset(identifier: str) -> dict:
         lead = f"Er is een beveiligde reset-link **gemaild** naar **{r['email_masked']}**."
     elif r["simulated"]:
         lead = (f"Er is een beveiligde reset-link klaargezet voor **{r['email_masked']}** "
-                f"(gesimuleerd — e-mail/Graph is niet geconfigureerd).")
+                f"(gesimuleerd: e-mail/Graph is niet geconfigureerd).")
     else:
         lead = (f"Het versturen naar **{r['email_masked']}** is mislukt; probeer het later "
                 f"opnieuw of maak een ticket.")
     text = (
         f"{lead}\nDe link is {r['valid_minutes']} minuten geldig.\n\n"
-        "Om veiligheidsredenen wordt er nooit een wachtwoord verstuurd — alleen een reset-link."
+        "Om veiligheidsredenen wordt er nooit een wachtwoord verstuurd, alleen een reset-link."
     )
     return _direct("reset", text, meta={"email_masked": r["email_masked"], "sent": r["sent"]})
 
@@ -192,9 +192,11 @@ def _do_software(session: dict, app_key: str) -> dict:
                        meta={"app": name})
     if r.get("method") == "ad" and r.get("added"):
         return _direct("software",
-                       f"Je aanvraag voor **{name}** is verwerkt. De installatie start "
-                       f"automatisch bij je volgende aanmelding (geen licentie nodig). "
-                       f"Zie je het niet meteen? Meld je dan opnieuw aan.",
+                       f"Je aanvraag voor **{name}** is verwerkt. De software wordt automatisch "
+                       f"geïnstalleerd bij je volgende aanmelding (geen licentie nodig). Dit kan "
+                       f"een paar minuten duren. Wil je het meteen zien? Meld je af en weer aan. "
+                       f"Je kunt het versnellen door op je computer `gpupdate /force` uit te voeren "
+                       f"en je daarna opnieuw aan te melden.",
                        meta={"app": name})
     # Geen AD beschikbaar: nette simulatie.
     return _direct("software",
@@ -202,11 +204,197 @@ def _do_software(session: dict, app_key: str) -> dict:
                    meta={"app": name})
 
 
+def _software_other_user(session: dict, msg: str) -> dict:
+    """Zelfservice geldt alleen voor je eigen account. Voor iemand anders: bied een ticket aan."""
+    session["pending"] = "offer_ticket"
+    session["last_unanswered"] = msg
+    return _direct("software",
+                   "De zelfservice werkt alleen voor je eigen account, dus software voor "
+                   "iemand anders kan ik hier niet regelen. Wil je dat ik hiervoor een ticket "
+                   "aanmaak voor de Service Desk? (ja / nee)")
+
+
 def _handle_software(session: dict, msg: str) -> dict:
     if ad.enabled() and not session.get("auth"):
         return _direct("software_ask",
                        "Log eerst in (knop rechtsboven) om software aan te vragen.")
+    if router.mentions_other_user(msg):
+        return _software_other_user(session, msg)
     app = _extract_app(msg)
+    if not app:
+        session["pending"] = "software_request"
+        return _direct("software_ask",
+                       f"Welke software wil je aanvragen? Beschikbaar is: "
+                       f"{', '.join(config.APP_DISPLAY)}.")
+    return _do_software(session, app)
+
+
+def _do_software_status(session: dict, app_key: str) -> dict:
+    """Vertelt of het eigen account de software AL heeft, zonder iets te wijzigen."""
+    auth = session.get("auth") or {}
+    identifier = auth.get("sam") or auth.get("upn") or ""
+    if ad.enabled() and not identifier:
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om dit te kunnen bekijken.")
+    r = actions.check_software(identifier, app_key)
+    name = r.get("app_name") or app_key
+
+    if r.get("error") == "unknown_app":
+        return _direct("software",
+                       f"Die software ken ik niet. Beschikbaar is: {', '.join(config.APP_DISPLAY)}.")
+    if r.get("found") is False:
+        return _direct("software",
+                       "Ik kon je account niet vinden om dit te controleren. Log opnieuw in "
+                       "of maak een ticket aan.")
+    if r.get("error") == "group_missing":
+        return _direct("software",
+                       f"De automatische uitrol voor **{name}** is nog niet ingericht. Ik kan "
+                       f"er een ticket voor aanmaken voor de Service Desk.")
+    if r.get("error"):
+        return _direct("software",
+                       f"Ik kon de toegang voor **{name}** nu niet controleren. Probeer het later "
+                       f"opnieuw of maak een ticket aan.")
+    if r.get("has") is True:
+        return _direct("software",
+                       f"Ja, je hebt **{name}** al. Zie je het niet op je computer? Meld je dan "
+                       f"opnieuw aan, dan verschijnt het.", meta={"app": name})
+    if r.get("has") is False:
+        # Lees de bedoeling: waarschijnlijk wil de gebruiker het dán aanvragen. Vraag het, niet doen.
+        session["pending"] = "software_request"
+        session["pending_app"] = app_key
+        return _direct("software_ask",
+                       f"Je hebt **{name}** nog niet. Wil je dat ik het nu voor je aanvraag? (ja / nee)")
+    # Demo-modus (AD niet gekoppeld).
+    return _direct("software",
+                   f"In demo-modus (AD niet gekoppeld) kan ik de toegang voor **{name}** niet "
+                   f"live controleren.")
+
+
+def _handle_software_status(session: dict, msg: str) -> dict:
+    if ad.enabled() and not session.get("auth"):
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om dit te kunnen bekijken.")
+    if router.mentions_other_user(msg):
+        return _software_other_user(session, msg)
+    app = _extract_app(msg)
+    if not app:
+        session["pending"] = "software_status"
+        return _direct("software_ask",
+                       f"Voor welke software wil je dit controleren? Beschikbaar is: "
+                       f"{', '.join(config.APP_DISPLAY)}.")
+    return _do_software_status(session, app)
+
+
+def _do_software_remove(session: dict, app_key: str) -> dict:
+    """Haalt de software van het eigen account af (uit de AD-groep); de GPO de-installeert."""
+    auth = session.get("auth") or {}
+    identifier = auth.get("sam") or auth.get("upn") or ""
+    if ad.enabled() and not identifier:
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om software te verwijderen.")
+    r = actions.remove_software(identifier, app_key)
+    name = r.get("app_name") or app_key
+
+    if r.get("error") == "unknown_app":
+        return _direct("software",
+                       f"Die software ken ik niet. Beschikbaar is: {', '.join(config.APP_DISPLAY)}.")
+    if r.get("found") is False:
+        return _direct("software",
+                       "Ik kon je account niet vinden om dit te verwerken. Log opnieuw in "
+                       "of maak een ticket aan.")
+    if r.get("error") == "group_missing":
+        return _direct("software",
+                       f"De automatische uitrol voor **{name}** is niet ingericht, dus er is "
+                       f"niets te verwijderen.")
+    if r.get("error"):
+        return _direct("software",
+                       f"Er ging iets mis bij het verwijderen van **{name}**. Probeer het later "
+                       f"opnieuw of maak een ticket aan.")
+    if r.get("not_member"):
+        return _direct("software",
+                       f"Je hebt **{name}** niet (meer), dus er is niets te verwijderen.",
+                       meta={"app": name})
+    if r.get("method") == "ad" and r.get("removed"):
+        return _direct("software",
+                       f"Je aanvraag om **{name}** te verwijderen is verwerkt. De software wordt "
+                       f"automatisch verwijderd bij je volgende aanmelding. Het kan even duren tot "
+                       f"het weg is. Wil je het versnellen? Voer op je computer `gpupdate /force` "
+                       f"uit en meld je daarna opnieuw aan.",
+                       meta={"app": name})
+    return _direct("software",
+                   f"Je verzoek om **{name}** te verwijderen is genoteerd (demo-modus: AD niet "
+                   f"gekoppeld).", meta={"app": name})
+
+
+def _handle_software_remove(session: dict, msg: str) -> dict:
+    if ad.enabled() and not session.get("auth"):
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om software te verwijderen.")
+    if router.mentions_other_user(msg):
+        return _software_other_user(session, msg)
+    app = _extract_app(msg)
+    if not app:
+        session["pending"] = "software_remove"
+        return _direct("software_ask",
+                       f"Welke software wil je verwijderen? Beschikbaar is: "
+                       f"{', '.join(config.APP_DISPLAY)}.")
+    return _do_software_remove(session, app)
+
+
+def _route_software(session: dict, msg: str, history: list[dict]):
+    """Laat het LLM de bedoeling LEZEN (controleren / installeren / iets anders, en voor
+    jezelf of iemand anders). Lukt dat niet, dan valt het terug op de trefwoord-methode.
+    Geeft None terug als het níet over software blijkt te gaan, zodat de gewone afhandeling
+    (uitleg/RAG) het overneemt."""
+    if ad.enabled() and not session.get("auth"):
+        return _direct("software_ask",
+                       "Log eerst in (knop rechtsboven) om software te bekijken of aan te vragen.")
+
+    parsed = None
+    try:
+        import lmclient
+        parsed = lmclient.parse_software_intent(msg, history, config.APP_DISPLAY)
+    except Exception:
+        parsed = None
+
+    # Vangnet: geen bruikbaar LLM-oordeel -> oude trefwoord-aanpak.
+    if parsed is None:
+        if router.mentions_other_user(msg):
+            return _software_other_user(session, msg)
+        if router.wants_remove(msg):
+            return _handle_software_remove(session, msg)
+        if router.wants_status(msg):
+            return _handle_software_status(session, msg)
+        if router.classify(msg) == "software_request":
+            return _handle_software(session, msg)
+        return None
+
+    if parsed.get("intent") == "none":
+        return None
+    # Voor iemand anders? Zelfservice is alleen voor je eigen account.
+    if not parsed.get("for_self", True) or router.mentions_other_user(msg):
+        return _software_other_user(session, msg)
+
+    app = _extract_app(parsed.get("app", "")) or _extract_app(msg)
+    intent = parsed.get("intent")
+
+    if intent == "check":
+        if not app:
+            session["pending"] = "software_status"
+            return _direct("software_ask",
+                           f"Voor welke software wil je dit controleren? Beschikbaar is: "
+                           f"{', '.join(config.APP_DISPLAY)}.")
+        return _do_software_status(session, app)
+
+    if intent == "remove":
+        if not app:
+            session["pending"] = "software_remove"
+            return _direct("software_ask",
+                           f"Welke software wil je verwijderen? Beschikbaar is: "
+                           f"{', '.join(config.APP_DISPLAY)}.")
+        return _do_software_remove(session, app)
+
+    # intent == "install"
     if not app:
         session["pending"] = "software_request"
         return _direct("software_ask",
@@ -287,6 +475,16 @@ _TICKET_FIELDS = [
 ]
 _CANCEL = {"annuleer", "annuleren", "stop", "laat maar", "laat maar zitten", "laat zitten",
            "cancel", "niet meer", "hoeft niet", "nee", "neen"}
+# De gebruiker wil het voorgestelde onderwerp/omschrijving aanpassen (optie A).
+_ADJUST = {"pas aan", "aanpassen", "pas het aan", "nee pas aan", "corrigeren", "anders",
+           "klopt niet", "niet goed", "verander"}
+
+
+def _short_subject(text: str) -> str:
+    """Maakt een kort onderwerp van een langere tekst (eerste ~8 woorden)."""
+    text = text.strip()
+    words = text.split()
+    return " ".join(words[:8]) if len(words) > 8 else text
 
 
 def _prefill_subject(msg: str, history: list[dict]) -> str:
@@ -310,22 +508,50 @@ def _next_ticket_field(t: dict):
     return None, None
 
 
-def _begin_ticket(session: dict, onderwerp: str) -> dict:
-    """Start de intake: zet de staat en stel de eerste ontbrekende vraag.
-    Is de gebruiker ingelogd, dan worden naam en bedrijf automatisch overgenomen."""
+def _begin_ticket(session: dict, history: list[dict], request_msg: str = "") -> dict:
+    """Start de intake. Het LLM leest het probleem uit het GESPREK en stelt een onderwerp
+    + omschrijving voor; de gebruiker bevestigt dat kort (optie A). Lukt dat niet, dan
+    valt het terug op de eenvoudige methode. Naam/bedrijf komen uit de login."""
     auth = session.get("auth") or {}
-    t = {"onderwerp": onderwerp or "", "beschrijving": "",
+
+    onderwerp, beschrijving = "", ""
+    try:
+        import lmclient
+        onderwerp, beschrijving = lmclient.summarize_ticket(history, request_msg)
+    except Exception:
+        onderwerp, beschrijving = "", ""
+    if not onderwerp:                       # vangnet: oude, eenvoudige afleiding
+        onderwerp = _prefill_subject(request_msg, history)
+    if onderwerp and not beschrijving:
+        beschrijving = onderwerp
+
+    t = {"onderwerp": onderwerp or "", "beschrijving": beschrijving or "",
          "naam": auth.get("name", ""), "bedrijf": auth.get("company", ""),
          "telefoon": ""}
     session["ticket"] = t
+
+    # Hebben we een zinnig onderwerp uit het gesprek? Vraag dan om bevestiging (optie A).
+    if onderwerp:
+        session["ticket_confirm"] = True
+        omschr = f"\nOmschrijving: *{beschrijving}*" if beschrijving else ""
+        return _direct("ticket",
+                       f"Ik maak een ticket voor je aan over: **{onderwerp}**.{omschr}\n\n"
+                       f"Klopt dat? Typ **ja** om door te gaan, of omschrijf kort hoe het anders moet.")
+
+    # Geen context om op te bouwen: vraag gewoon het onderwerp (oude gedrag).
     field, question = _next_ticket_field(t)
     if field is None:
-        return _finish_ticket(session)   # alles al bekend (bv. ingelogd) -> meteen aanmaken
-    if onderwerp:
-        return _direct("ticket",
-                       f"Ik ga een ticket voor je aanmaken. Ik noteer als onderwerp: "
-                       f"**{onderwerp}**.\n\n{question}")
+        return _finish_ticket(session)
     return _direct("ticket", f"Prima, ik maak een ticket voor je aan.\n\n{question}")
+
+
+def _ask_next_or_finish(session: dict) -> dict:
+    """Stelt de volgende ontbrekende vraag, of maakt het ticket aan als alles er is."""
+    t = session["ticket"]
+    nxt_field, nxt_q = _next_ticket_field(t)
+    if nxt_field:
+        return _direct("ticket", nxt_q)
+    return _finish_ticket(session)
 
 
 def _finish_ticket(session: dict) -> dict:
@@ -351,18 +577,42 @@ def _finish_ticket(session: dict) -> dict:
 
 
 def _continue_ticket(session: dict, msg: str, low: str) -> dict:
-    """Verwerkt het antwoord op de lopende intake-vraag."""
+    """Verwerkt het antwoord tijdens een lopende ticket-intake."""
+    t = session["ticket"]
+
+    # Fase 1: bevestiging van het voorgestelde onderwerp/omschrijving (optie A).
+    if session.get("ticket_confirm"):
+        if low in _CANCEL:
+            session.pop("ticket", None); session.pop("ticket_confirm", None)
+            return _direct("info", "Oké, ik heb geen ticket aangemaakt. Kan ik iets anders doen?")
+        if low in _AFFIRMATIVE:
+            session.pop("ticket_confirm", None)
+            return _ask_next_or_finish(session)
+        if low in _ADJUST:
+            session.pop("ticket_confirm", None)
+            session["ticket_await_subject"] = True
+            return _direct("ticket", "Geen probleem. Omschrijf kort waar het ticket over moet gaan.")
+        # Iets anders getypt = de gebruiker geeft zelf de omschrijving.
+        session.pop("ticket_confirm", None)
+        t["beschrijving"] = msg.strip()
+        t["onderwerp"] = _short_subject(msg.strip())
+        return _ask_next_or_finish(session)
+
+    # Fase 2: de gebruiker omschrijft het onderwerp zelf (na 'pas aan').
+    if session.get("ticket_await_subject"):
+        session.pop("ticket_await_subject", None)
+        t["onderwerp"] = _short_subject(msg.strip())
+        t["beschrijving"] = msg.strip()
+        return _ask_next_or_finish(session)
+
+    # Fase 3: gewone velden invullen (meestal alleen nog telefoon).
     if low in _CANCEL:
         session.pop("ticket", None)
         return _direct("info", "Oké, ik heb geen ticket aangemaakt. Kan ik iets anders doen?")
-    t = session["ticket"]
     field, _q = _next_ticket_field(t)
     if field:
         t[field] = msg.strip()
-    nxt_field, nxt_q = _next_ticket_field(t)
-    if nxt_field:
-        return _direct("ticket", nxt_q)
-    return _finish_ticket(session)
+    return _ask_next_or_finish(session)
 
 
 # --- Hoofddispatcher --------------------------------------------------------
@@ -387,30 +637,63 @@ def prepare(message: str, session: dict | None = None) -> dict:
     elif pending == "offer_ticket":
         session["pending"] = None
         if low in _AFFIRMATIVE:
-            return _begin_ticket(session, session.get("last_unanswered", ""))
+            return _begin_ticket(session, history, session.get("last_unanswered", ""))
         if low in _NEGATIVE:
             return _direct("info", "Oké, ik heb geen ticket aangemaakt. Kan ik iets anders doen?")
     elif pending == "software_request":
         session["pending"] = None
         if low in _CANCEL or low in _NEGATIVE:
+            session.pop("pending_app", None)
             return _direct("info", "Oké, ik heb geen software aangevraagd. Kan ik iets anders doen?")
         app = _extract_app(msg)
+        if not app and low in _AFFIRMATIVE:        # "ja" op een eerder installeer-aanbod
+            app = session.get("pending_app")
         if app:
+            session.pop("pending_app", None)
             return _do_software(session, app)
         session["pending"] = "software_request"
         return _direct("software_ask",
                        f"Die software herken ik niet. Kies uit: {', '.join(config.APP_DISPLAY)}.")
+    elif pending == "software_status":
+        session["pending"] = None
+        if low in _CANCEL or low in _NEGATIVE:
+            return _direct("info", "Oké. Kan ik iets anders doen?")
+        app = _extract_app(msg)
+        if app:
+            return _do_software_status(session, app)
+        session["pending"] = "software_status"
+        return _direct("software_ask",
+                       f"Die software herken ik niet. Kies uit: {', '.join(config.APP_DISPLAY)}.")
+    elif pending == "software_remove":
+        session["pending"] = None
+        if low in _CANCEL or low in _NEGATIVE:
+            return _direct("info", "Oké, ik heb niets verwijderd. Kan ik iets anders doen?")
+        app = _extract_app(msg)
+        if app:
+            return _do_software_remove(session, app)
+        session["pending"] = "software_remove"
+        return _direct("software_ask",
+                       f"Die software herken ik niet. Kies uit: {', '.join(config.APP_DISPLAY)}.")
 
-    # 2) Intent.
+    # 2) Software/toegang: laat het model de bedoeling lezen (betrouwbaarder dan trefwoorden).
+    if router.software_topic(msg):
+        routed = _route_software(session, msg, history)
+        if routed is not None:
+            return routed
+
+    # 3) Intent (trefwoorden) voor de overige gevallen.
     intent = router.classify(msg)
 
     if intent == "greeting":
         return _direct(
             "greeting",
             "Hoi! Ik ben de Proact Service Desk Assistant. Vraag me iets over wachtwoorden, "
-            "MFA, VPN, licenties, printers of onboarding — of laat me een wachtwoordreset "
+            "MFA, VPN, licenties, printers of onboarding, of laat me een wachtwoordreset "
             "starten of een ticket aanmaken.",
         )
+
+    if intent == "software_status":
+        return _handle_software_status(session, msg)
 
     if intent == "software_request":
         return _handle_software(session, msg)
@@ -419,7 +702,7 @@ def prepare(message: str, session: dict | None = None) -> dict:
         return _handle_reset(session, msg)
 
     if intent == "create_ticket":
-        return _begin_ticket(session, _prefill_subject(msg, history))
+        return _begin_ticket(session, history, msg)
 
     # 3) Kennisvraag -> RAG (met gespreksgeheugen).
     last_user = _last_user_message(history)
@@ -438,7 +721,10 @@ def prepare(message: str, session: dict | None = None) -> dict:
     user_prompt = (
         f"{_history_block(history)}"
         f"Context uit de kennisbank:\n\n{context}\n\n"
-        f"Huidige vraag: {msg}"
+        f"Huidige vraag: {msg}\n\n"
+        "Beantwoord de huidige vraag en speel in op wat de klant hierboven al heeft verteld. "
+        "Herhaal geen stappen die de klant al heeft gedaan of die je eerder al noemde, en "
+        "vraag niet te controleren wat de klant net al heeft gemeld."
     )
     sources = sorted({h["source"] for h in hits})
     hit_links = links.for_sources([h["source"] for h in hits])   # officiële Microsoft-link(s)

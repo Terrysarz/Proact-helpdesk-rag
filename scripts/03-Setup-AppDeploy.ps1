@@ -2,36 +2,45 @@
     03-Setup-AppDeploy.ps1
     ----------------------------------------------------------------------------
     Richt de zelfservice software-uitrol in voor de Proact-chatbot (lab).
+    Voorbeeld-app: Adobe Acrobat Reader DC.
 
     Wat dit script doet (op de domaincontroller, als Administrator):
       1. Maakt de security-groep 'App-AdobeReader' in OU=ProactLab.
-      2. Maakt een gedeelde map \\<DC>\Deploy met de MSI('s) erin (read-only voor
-         domeincomputers/gebruikers).
-      3. Maakt een GPO 'Deploy-AdobeReader', koppelt die aan OU=ProactLab en zet de
+      2. Geeft het serviceaccount (svc-chatbot) recht om leden van die groep te
+         beheren, zodat de chatbot gebruikers kan toevoegen/verwijderen.
+      3. Maakt een gedeelde map \\<DC>\Deploy\Reader met de MSI en het
+         verwijder-script erin (read-only voor domeincomputers/gebruikers).
+      4. Maakt een GPO 'Deploy-AdobeReader', koppelt die aan OU=ProactLab en zet de
          security-filtering zo dat ALLEEN leden van 'App-AdobeReader' de software krijgen.
 
-    Wat je daarna ZELF nog doet (kan niet via PowerShell — zie README onderaan):
-      4. In de GPO-editor de MSI toewijzen onder
-         Gebruikersconfiguratie > Beleid > Softwareinstellingen > Software-installatie.
+    Wat je daarna ZELF nog doet (kan niet via PowerShell, zie uitvoer onderaan):
+      5. In de GPO-editor de MSI TOEWIJZEN onder Gebruikersconfiguratie.
+      6. Een geplande taak (GPO) aanmaken die 'Uninstall-AdobeReader.ps1' draait,
+         zodat Reader wordt verwijderd zodra iemand uit de groep is.
 
-    De chatbot voegt een gebruiker toe aan 'App-AdobeReader'; bij de volgende
-    aanmelding rolt de GPO Adobe Reader uit.
+    Rolverdeling:
+      - De chatbot beheert alleen het GROEPSLIDMAATSCHAP (wie mag de software).
+      - De GPO installeert Reader bij aanmelding voor groepsleden.
+      - Het verwijder-script haalt Reader weg bij aanmelding voor niet-leden.
     ----------------------------------------------------------------------------
     Gebruik:
-      .\03-Setup-AppDeploy.ps1 -MsiPath "C:\Install\AcroRdrDC.msi"
-    (zonder -MsiPath wordt alleen groep/share/GPO gemaakt; MSI zet je er later in)
+      .\03-Setup-AppDeploy.ps1 -MsiPath "C:\Install\AcroRead.msi" `
+                               -UninstallScript "C:\Install\Uninstall-AdobeReader.ps1"
+    (zonder -MsiPath wordt alleen groep/share/GPO gemaakt; bestanden zet je er later in)
 #>
 
 [CmdletBinding()]
 param(
-    [string]$MsiPath = "",
-    [string]$OU      = "OU=ProactLab,DC=lab,DC=proact,DC=local",
-    [string]$GroupName = "App-AdobeReader",
-    [string]$GpoName   = "Deploy-AdobeReader",
-    [string]$ShareRoot = "C:\Deploy",
-    [string]$ShareName = "Deploy",
-    [string]$ServiceAccount = "svc-chatbot",
-    [string]$NetbiosDomain  = "LAB"
+    [string]$MsiPath         = "",
+    [string]$UninstallScript = "",
+    [string]$OU              = "OU=ProactLab,DC=lab,DC=proact,DC=local",
+    [string]$GroupName       = "App-AdobeReader",
+    [string]$GpoName         = "Deploy-AdobeReader",
+    [string]$ShareRoot       = "C:\Deploy",
+    [string]$ShareName       = "Deploy",
+    [string]$AppSubDir       = "Reader",
+    [string]$ServiceAccount  = "svc-chatbot",
+    [string]$NetbiosDomain   = "LAB"
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,8 +63,10 @@ $groupDn = (Get-ADGroup -Identity $GroupName).DistinguishedName
 & dsacls "$groupDn" /G "$NetbiosDomain\$($ServiceAccount):WP;member" | Out-Null
 Write-Host "   $NetbiosDomain\$ServiceAccount mag nu leden van '$GroupName' beheren."
 
-Write-Host "== 2) Gedeelde map voor de MSI('s) ==" -ForegroundColor Cyan
+Write-Host "== 2) Gedeelde map + app-submap ==" -ForegroundColor Cyan
 if (-not (Test-Path $ShareRoot)) { New-Item -ItemType Directory -Path $ShareRoot | Out-Null }
+$appDir = Join-Path $ShareRoot $AppSubDir
+if (-not (Test-Path $appDir)) { New-Item -ItemType Directory -Path $appDir | Out-Null }
 # Taal-onafhankelijk: 'Authenticated Users' via well-known SID S-1-5-11, zodat dit ook
 # op een Nederlandstalige Windows werkt (daar heet die groep 'Geverifieerde gebruikers').
 $authUsers = ([System.Security.Principal.SecurityIdentifier]"S-1-5-11").Translate([System.Security.Principal.NTAccount]).Value
@@ -66,19 +77,28 @@ if (-not (Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue)) {
 } else {
     Write-Host "   Share '$ShareName' bestaat al."
 }
-# NTFS-leesrechten voor domeincomputers (software-install draait als SYSTEM/computeraccount).
+# NTFS-leesrechten voor domeincomputers (install/uninstall draait als SYSTEM/computeraccount).
 # SID-notatie (*S-1-5-11) is taal-onafhankelijk.
 icacls $ShareRoot /grant "*S-1-5-11:(OI)(CI)R" /T | Out-Null
 
 $uncMsi = ""
 if ($MsiPath -ne "") {
     if (-not (Test-Path $MsiPath)) { throw "MSI niet gevonden: $MsiPath" }
-    Copy-Item $MsiPath -Destination $ShareRoot -Force
+    Copy-Item $MsiPath -Destination $appDir -Force
     $msiFile = Split-Path $MsiPath -Leaf
-    $uncMsi  = "\\$env:COMPUTERNAME\$ShareName\$msiFile"
+    $uncMsi  = "\\$env:COMPUTERNAME\$ShareName\$AppSubDir\$msiFile"
     Write-Host "   MSI gekopieerd. UNC-pad voor de GPO: $uncMsi"
 } else {
-    Write-Host "   (Geen -MsiPath opgegeven. Zet de MSI later zelf in $ShareRoot.)" -ForegroundColor Yellow
+    Write-Host "   (Geen -MsiPath opgegeven. Zet de MSI later zelf in $appDir.)" -ForegroundColor Yellow
+}
+
+$uncUninstall = "\\$env:COMPUTERNAME\$ShareName\$AppSubDir\Uninstall-AdobeReader.ps1"
+if ($UninstallScript -ne "") {
+    if (-not (Test-Path $UninstallScript)) { throw "Verwijder-script niet gevonden: $UninstallScript" }
+    Copy-Item $UninstallScript -Destination (Join-Path $appDir "Uninstall-AdobeReader.ps1") -Force
+    Write-Host "   Verwijder-script gekopieerd. UNC-pad voor de taak: $uncUninstall"
+} else {
+    Write-Host "   (Geen -UninstallScript opgegeven. Zet Uninstall-AdobeReader.ps1 later in $appDir.)" -ForegroundColor Yellow
 }
 
 Write-Host "== 3) GPO aanmaken, koppelen en filteren ==" -ForegroundColor Cyan
@@ -100,17 +120,30 @@ Write-Host "   Filtering gezet: alleen '$GroupName' krijgt de software."
 Write-Host ""
 Write-Host "KLAAR met het automatische deel." -ForegroundColor Green
 Write-Host "----------------------------------------------------------------" -ForegroundColor Green
-Write-Host "NOG ZELF DOEN (eenmalig) in de Group Policy Management Editor:" -ForegroundColor Green
-Write-Host "  1. Open 'Group Policy Management' > rechtsklik '$GpoName' > Bewerken."
-Write-Host "  2. Gebruikersconfiguratie > Beleid > Softwareinstellingen > Software-installatie."
-Write-Host "  3. Rechtsklik > Nieuw > Pakket... en kies de MSI via het UNC-pad:"
-if ($uncMsi -ne "") {
-    Write-Host "       $uncMsi"
-} else {
-    Write-Host "       \\$env:COMPUTERNAME\$ShareName\<jouw-reader>.msi"
-}
-Write-Host "     LET OP: kies het UNC-pad (\\server\share\...), NIET C:\..."
-Write-Host "  4. Kies 'Toegewezen' (Assigned). Klaar."
+Write-Host "NOG ZELF DOEN (eenmalig):" -ForegroundColor Green
+Write-Host ""
+Write-Host "A) INSTALLEREN - MSI toewijzen in de GPO-editor:" -ForegroundColor Green
+Write-Host "   1. Group Policy Management > rechtsklik '$GpoName' > Bewerken."
+Write-Host "   2. Gebruikersconfiguratie > Beleid > Software-instellingen > Software-installatie."
+Write-Host "   3. Rechtsklik > Nieuw > Pakket... kies de MSI via het UNC-pad:"
+if ($uncMsi -ne "") { Write-Host "        $uncMsi" } else { Write-Host "        \\$env:COMPUTERNAME\$ShareName\$AppSubDir\<reader>.msi" }
+Write-Host "      LET OP: kies het UNC-pad (\\server\share\...), NIET C:\..."
+Write-Host "   4. Distributietype: 'Toegewezen' (Assigned)."
+Write-Host "   5. Pakket-eigenschappen > tab Distributie: vink AAN"
+Write-Host "        - 'Deze toepassing na aanmelding installeren'"
+Write-Host "        - 'De installatie van deze toepassing ongedaan maken als deze niet wordt beheerd'"
+Write-Host ""
+Write-Host "B) VERWIJDEREN - geplande taak die het verwijder-script draait:" -ForegroundColor Green
+Write-Host "   In een GPO die op de CLIENT-COMPUTER werkt (bv. Default Domain Policy):"
+Write-Host "   Computerconfiguratie > Voorkeuren > Configuratieschermopties > Geplande taken"
+Write-Host "   > Nieuw > Geplande taak (minimaal Windows 7):"
+Write-Host "        - Uitvoeren als: NT AUTHORITY\SYSTEM, hoogste bevoegdheden,"
+Write-Host "          'Uitvoeren ongeacht of gebruiker is aangemeld'."
+Write-Host "        - Trigger: Bij aanmelden (Elke gebruiker)."
+Write-Host "        - Actie: 'powershell.exe' starten met argumenten:"
+Write-Host "            -NoProfile -ExecutionPolicy Bypass -File $uncUninstall"
 Write-Host "----------------------------------------------------------------" -ForegroundColor Green
-Write-Host "Testen: voeg een testgebruiker toe aan '$GroupName' (of via de chatbot),"
-Write-Host "meld die gebruiker aan op een domein-client; Reader installeert bij aanmelding."
+Write-Host "Testen via de chatbot:" -ForegroundColor Green
+Write-Host "  'installeer adobe'  -> aanmelden -> Reader installeert."
+Write-Host "  'verwijder adobe'   -> aanmelden -> Reader wordt verwijderd (en komt niet terug)."
+Write-Host "  Versnellen op de client kan met: gpupdate /force  + opnieuw aanmelden."

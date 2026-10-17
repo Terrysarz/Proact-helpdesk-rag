@@ -9,3 +9,4 @@ ad.env
 __pycache__/
 data/
 index.json
+*.env

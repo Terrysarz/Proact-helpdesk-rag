@@ -249,6 +249,90 @@ def request_software(identifier: str, app_key: str) -> dict:
     return result
 
 
+def remove_software(identifier: str, app_key: str) -> dict:
+    """Zelfservice software-verwijdering: haalt het account UIT de AD-groep die bij de
+    applicatie hoort. Een GPO (ingesteld op 'verwijderen zodra buiten bereik') de-installeert
+    de software daarna bij de volgende aanmelding. Geeft een veilige samenvatting terug."""
+    group_cn = config.APP_GROUPS.get(app_key.lower())
+    result = {
+        "app_key": app_key,
+        "app_name": config.APP_NAMES.get(group_cn, app_key),
+        "group": group_cn or "",
+        "method": "simulated", "found": None,
+        "removed": False, "not_member": False, "error": None,
+    }
+    if not group_cn:
+        result["error"] = "unknown_app"
+        return result
+
+    if ad and ad.enabled():
+        result["method"] = "ad"
+        try:
+            user = ad.find_user(identifier)
+            if user is None:
+                result["found"] = False
+                _log_action("software_remove", {"identifier": identifier, "app": result["app_name"],
+                                                "group": group_cn, "method": "ad", "found": False})
+                return result
+            result["found"] = True
+            grp = ad.find_group(group_cn)
+            if grp is None:
+                result["error"] = "group_missing"
+            else:
+                members_low = [m.lower() for m in grp.get("members", [])]
+                if user["dn"].lower() in members_low:
+                    ad.remove_from_group(user["dn"], grp["dn"])
+                    result["removed"] = True
+                else:
+                    result["not_member"] = True
+        except Exception as e:
+            result["error"] = str(e)
+
+    _log_action("software_remove", {"identifier": identifier, "app": result["app_name"],
+                                    "group": group_cn, "method": result["method"],
+                                    "removed": result["removed"], "not_member": result["not_member"],
+                                    "error": result["error"]})
+    return result
+
+
+def check_software(identifier: str, app_key: str) -> dict:
+    """Controleert ZONDER iets te wijzigen of het account al in de software-groep zit
+    (en dus al toegang heeft). Verandert niets in AD. 'has' is True/False, of None als
+    dat niet te bepalen is (demo-modus / fout)."""
+    group_cn = config.APP_GROUPS.get(app_key.lower())
+    result = {
+        "app_key": app_key,
+        "app_name": config.APP_NAMES.get(group_cn, app_key),
+        "group": group_cn or "",
+        "method": "simulated", "found": None, "has": None, "error": None,
+    }
+    if not group_cn:
+        result["error"] = "unknown_app"
+        return result
+
+    if ad and ad.enabled():
+        result["method"] = "ad"
+        try:
+            user = ad.find_user(identifier)
+            if user is None:
+                result["found"] = False
+            else:
+                result["found"] = True
+                grp = ad.find_group(group_cn)
+                if grp is None:
+                    result["error"] = "group_missing"
+                else:
+                    members_low = [m.lower() for m in grp.get("members", [])]
+                    result["has"] = user["dn"].lower() in members_low
+        except Exception as e:
+            result["error"] = str(e)
+
+    _log_action("software_check", {"identifier": identifier, "app": result["app_name"],
+                                   "group": group_cn, "method": result["method"],
+                                   "has": result["has"], "error": result["error"]})
+    return result
+
+
 def request_password_reset(identifier: str) -> dict:
     """
     Start een wachtwoordreset. In volgorde, afhankelijk van de configuratie:

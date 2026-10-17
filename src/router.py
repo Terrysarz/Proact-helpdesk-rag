@@ -36,11 +36,31 @@ _PW_WORDS = ("wachtwoord", "password", "inloggen", "aanmelden")
 _PW_RESET_WORDS = ("reset", "resetten", "vergeten", "kwijt", "opnieuw", "nieuw", "geblokkeerd", "vastgelopen")
 _TICKET_WORDS = ("ticket", "melding", "storing", "incident", "aanvraag")
 # Zelfservice software-uitrol (installeer/aanvragen van een applicatie).
-# Werkwoorden en concrete app-namen zijn een STERK actiesignaal (ook zonder los
-# verzoekwoord); algemene woorden ("software") hebben wél een verzoekwoord nodig.
-_SOFTWARE_VERBS = ("installeer", "installeren", "installatie", "uitrollen", "uitrol")
-_APP_HINTS = ("adobe", "acrobat", "reader", "7-zip", "7zip")
+# Een INSTALLATIE-werkwoord is een echt actiesignaal. Een kale app-naam is dat NIET:
+# "de reader opent niet" of "heb ik adobe?" mogen nooit zomaar een installatie starten.
+_SOFTWARE_VERBS = ("installeer", "installeren", "installatie", "uitrollen", "uitrol",
+                   "aanvragen", "aanvraag", "toevoegen", "erbij zetten")
+_APP_HINTS = ("adobe", "acrobat", "reader")
 _SOFTWARE_WORDS = _SOFTWARE_VERBS + ("software", "programma", "applicatie") + _APP_HINTS
+
+# De gebruiker wil CONTROLEREN of iets er is, niet iets installeren.
+_CHECK_CUES = ("kijken of", "kijk of", "checken of", "check of", "controleer", "controleren",
+               "nagaan", "ga na", "heb ik toegang", "heb ik al", "heb ik recht",
+               "al toegang", "al geinstalleerd", "al geïnstalleerd", "staat het al",
+               "heb ik ", "is er al")
+# De gebruiker wil software VERWIJDEREN / deïnstalleren.
+_REMOVE_CUES = ("verwijder", "verwijderen", "deinstalleer", "deïnstalleer", "de-installeer",
+                "weghalen", "haal weg", "haal eraf", "eraf halen", "eraf", "wil ik niet meer",
+                "hoef ik niet meer", "mag weg", "uitzetten")
+# Het verzoek gaat over IEMAND ANDERS, niet over het eigen account.
+_OTHER_USER_CUES = ("andere gebruiker", "iemand anders", "een ander", "collega", "medewerker",
+                    "namens", "voor iemand", "ander account", "voor de gebruiker",
+                    "een gebruiker")
+# Een probleemMELDING is geen installatieverzoek -> die hoort bij uitleg/ticket.
+_PROBLEM_CUES = ("werkt niet", "werkt niet meer", "lukt niet", "doet het niet", "doet niets",
+                 "crasht", "vastgelopen", "loopt vast", "foutmelding", "error", "start niet",
+                 "opent niet", "niet openen", "niet starten", "niet meer", "probleem met",
+                 "kapot", "hangt")
 
 
 def _normalize(text: str) -> str:
@@ -64,6 +84,44 @@ def _looks_like_request(text: str) -> bool:
     return bool(re.match(r"^(reset|maak|open|start|stuur|regel|installeer)\b", t))
 
 
+def wants_status(text: str) -> bool:
+    """De gebruiker wil CONTROLEREN of iets aanwezig is (geen actie)."""
+    return any(cue in _normalize(text) for cue in _CHECK_CUES)
+
+
+def wants_remove(text: str) -> bool:
+    """De gebruiker wil software laten verwijderen/deïnstalleren."""
+    return any(cue in _normalize(text) for cue in _REMOVE_CUES)
+
+
+def mentions_other_user(text: str) -> bool:
+    """Het verzoek gaat over iemand anders dan het eigen account."""
+    return any(cue in _normalize(text) for cue in _OTHER_USER_CUES)
+
+
+def _is_problem_report(text: str) -> bool:
+    """Een storings-/probleemmelding (hoort bij uitleg/ticket, niet bij installeren)."""
+    return any(cue in _normalize(text) for cue in _PROBLEM_CUES)
+
+
+def software_topic(text: str) -> bool:
+    """Ruwe voorfilter: zou dit over werkplek-software of toegang kunnen gaan? Zo ja, laat
+    het LLM de precieze bedoeling lezen. Breed opgezet; de fijn-bepaling doet het model."""
+    t = _normalize(text)
+    if any(a in t for a in _APP_HINTS):
+        return True
+    if any(w in t for w in ("software", "programma", "applicatie", "app ", "tool")):
+        return True
+    if any(v in t for v in _SOFTWARE_VERBS):
+        return True
+    # Ondubbelzinnige deïnstalleer-werkwoorden gaan altijd over software.
+    if any(v in t for v in ("deinstalleer", "deïnstalleer", "de-installeer", "uninstall")):
+        return True
+    if "toegang" in t or "access" in t:
+        return True
+    return False
+
+
 def classify(text: str) -> str:
     t = _normalize(text)
     if not t:
@@ -75,11 +133,21 @@ def classify(text: str) -> str:
     is_question_phrasing = any(t.startswith(c) or (" " + c) in (" " + t) for c in _QUESTION_CUES)
     request = _looks_like_request(t)
 
-    # Software aanvragen/installeren: alleen als ACTIE bedoeld, niet als uitlegvraag.
-    if not is_question_phrasing and any(w in t for w in _SOFTWARE_WORDS):
-        strong = any(v in t for v in _SOFTWARE_VERBS) or any(a in t for a in _APP_HINTS)
-        if strong or request:
-            return "software_request"
+    # Software: eerst LEZEN wat de gebruiker wil, dan pas routeren.
+    software_ctx = any(w in t for w in _SOFTWARE_WORDS)
+    if software_ctx:
+        # 1) Controlevraag ("heb ik toegang / kijken of ...") -> status, geen installatie.
+        if wants_status(t):
+            return "software_status"
+        has_verb = any(v in t for v in _SOFTWARE_VERBS)
+        # 2) Uitlegvraag ("hoe installeer ik ...") of probleemmelding ("de reader opent niet")
+        #    is GEEN installatieverzoek.
+        problemish = _is_problem_report(t) or ("niet" in t and not has_verb)
+        if not is_question_phrasing and not problemish:
+            # 3) Alleen installeren bij een echt actiesignaal: een werkwoord, een verzoek,
+            #    of een concrete app-naam (bv. "adobe reader").
+            if has_verb or request or any(a in t for a in _APP_HINTS):
+                return "software_request"
 
     # Wachtwoordreset: alleen als ACTIE bedoeld (verzoek), niet als uitlegvraag.
     if any(w in t for w in _PW_WORDS) and any(w in t for w in _PW_RESET_WORDS):

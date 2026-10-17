@@ -153,6 +153,19 @@ def add_to_group(user_dn: str, group_dn: str) -> None:
         conn.unbind()
 
 
+def remove_from_group(user_dn: str, group_dn: str) -> None:
+    """Haalt een gebruiker UIT een AD-groep (serviceaccount moet dit mogen). Als de GPO
+    is ingesteld om de software te verwijderen zodra het account buiten de groep valt,
+    wordt de applicatie bij de volgende aanmelding automatisch gede-installeerd."""
+    conn = _connect()
+    try:
+        ok = conn.extend.microsoft.remove_members_from_groups([user_dn], [group_dn], fix=True)
+        if ok is False:
+            raise RuntimeError(f"verwijderen uit groep mislukt: {conn.result}")
+    finally:
+        conn.unbind()
+
+
 def _gen_password(length: int = 16) -> str:
     """Genereert een sterk tijdelijk wachtwoord dat aan AD-complexiteit voldoet."""
     alphabet = string.ascii_letters + string.digits + "!@#$%?-"
