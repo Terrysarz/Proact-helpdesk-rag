@@ -23,16 +23,21 @@ uitrollen, allemaal via een chatgesprek dat gekoppeld is aan Active Directory.
   Het wachtwoord komt nooit in de chat te staan. Dat is een bewuste beveiligingskeuze.
 - **Inloggen met een AD-account** in de chatbot, met autorisatie: een gebruiker kan
   alleen het eigen account resetten, een servicedesk-medewerker ook dat van anderen.
-- **Ticket-intake** die eerst informatie verzamelt (onderwerp, naam, bedrijf) voordat
-  er een ticket wordt aangemaakt. Bij een ingelogde gebruiker worden naam en bedrijf
-  automatisch overgenomen.
-- **Zelfservice software-uitrol**: een gebruiker vraagt een applicatie aan, de bot
-  zet het account in een AD-groep, en een GPO rolt de software uit bij de volgende
-  aanmelding. Beschreven in `scripts/README-APP-DEPLOY.md`.
+- **Ticket-intake** waarbij het taalmodel het onderwerp en de omschrijving uit het
+  gesprek samenvat en ter bevestiging voorlegt, zodat de klant zich niet hoeft te
+  herhalen. Bij een ingelogde gebruiker worden naam en bedrijf automatisch overgenomen,
+  en een bevestiging wordt gemaild.
+- **Zelfservice software**: een gebruiker kan via de chat een applicatie (Adobe Reader)
+  aanvragen, controleren of die al klaarstaat, of weer laten verwijderen. De bot leest
+  met het taalmodel wat er echt bedoeld wordt (aanvragen, controleren of verwijderen, en
+  of het voor jezelf of iemand anders is), zet het account in of uit de bijbehorende
+  AD-groep, en een GPO installeert of verwijdert de software bij de volgende aanmelding.
+  Beschreven in `scripts/README-APP-DEPLOY.md`.
 - **Nette foutafhandeling** met een duidelijke melding in plaats van een crash als de
   modelserver uit staat.
 - **Klantgerichte interface** met een denk-indicator en klikbare links, zonder interne
-  jargon in de antwoorden.
+  jargon in de antwoorden. De interne bronbestandsnamen toon ik niet aan de klant, alleen
+  een nette publieke hulplink.
 - **Officiële Microsoft-links** worden automatisch bij het antwoord meegestuurd.
 - **Eigen kennisbank**: ik lees `.docx`, `.md` en `.txt` in; mijn eigen Word-documenten
   staan in `documents/` en worden met `ingest.py` verwerkt.
@@ -43,7 +48,7 @@ uitrollen, allemaal via een chatgesprek dat gekoppeld is aan Active Directory.
 Documenten -> chunken -> embeddings (nomic-embed) -> vector-index (index.json)
 
 Bericht -> intent-router -+- begroeting / actie / onbekend -> direct antwoord (geen LLM)
-                          +- kennisvraag -> retrieval (+ geheugen) -> context+prompt -> LLM (qwen3, streaming) -> antwoord + bron
+                          +- kennisvraag -> retrieval (+ geheugen) -> context+prompt -> LLM (qwen3-8b, streaming) -> antwoord + bron
 ```
 
 De acties lopen in volgorde van wat is geconfigureerd: eerst Microsoft Graph (Entra ID),
@@ -71,8 +76,10 @@ gebruik ik de Active Directory-route.
 
 ## Stappen die ik heb doorlopen om het draaiend te krijgen
 
-1. **LM Studio** op de VM geinstalleerd, beide modellen geladen en de server gestart
-   op poort 1234: `qwen/qwen3-4b-2507` en `nomic-embed-text-v1.5`.
+1. **LM Studio** geinstalleerd en de server gestart op poort 1234, met de modellen
+   `qwen/qwen3-8b` en `nomic-embed-text-v1.5`. Het model is instelbaar via de
+   omgevingsvariabele `LLM_MODEL`. Om het rekenwerk sneller te maken draai ik het model
+   op een aparte machine (Apple Silicon) en wijs ik de chatbot daarheen met `LMSTUDIO_HOST`.
 2. **Python-omgeving** opgezet en de index opgebouwd:
    ```bash
    python3 -m venv .venv && source .venv/bin/activate
@@ -83,10 +90,12 @@ gebruik ik de Active Directory-route.
 3. **Active Directory-lab** opgezet met de scripts in `scripts/` (domaincontroller,
    OU, gebruikers, serviceaccount) en de chatbot via LDAPS gekoppeld.
 4. **Instellingen** als omgevingsvariabelen gezet (nooit in de code), zie hieronder.
-5. **Software-uitrol** ingericht, beschreven in `scripts/README-APP-DEPLOY.md`.
+5. **Zelfservice software** ingericht (installeren en verwijderen via een AD-groep en
+   GPO), beschreven in `scripts/README-APP-DEPLOY.md`.
 
 Dingen die ik heb getest: *Hoe reset ik mijn wachtwoord?*, *Reset mijn wachtwoord*,
-*Maak een ticket voor een kapotte printer*, en *Ik wil Adobe Reader*.
+*Maak een ticket voor een kapotte printer*, *Ik wil Adobe Reader*, *Heb ik al toegang
+tot Adobe?* en *Verwijder Adobe weer*.
 
 ## Instellingen (omgevingsvariabelen)
 
@@ -107,9 +116,14 @@ export SMTP_PORT=587
 export SMTP_USER=<mijn-adres>
 export SMTP_PASS=<gmail-app-wachtwoord>
 export RESET_NOTIFY_OVERRIDE=<vangnet-inbox>
+
+# Optioneel: ander model of een externe LM Studio-host
+export LLM_MODEL=qwen/qwen3-8b
+export LMSTUDIO_HOST=192.168.2.27:1234   # LM Studio op een andere machine (bv. een Mac)
 ```
 
-Zonder deze variabelen wordt de reset-mail gesimuleerd in plaats van echt verstuurd.
+Zonder deze variabelen wordt de reset-mail gesimuleerd in plaats van echt verstuurd, en
+draait het model lokaal in plaats van op een externe host.
 
 ## Beveiligingskeuzes die ik heb gemaakt
 
