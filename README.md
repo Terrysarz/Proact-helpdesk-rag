@@ -120,7 +120,7 @@ export SMTP_USER=<mijn-adres>
 export SMTP_PASS=<gmail-app-wachtwoord>
 export RESET_NOTIFY_OVERRIDE=<vangnet-inbox>
 
-# Optioneel: ander model of een externe LM Studio-host
+#ander model of een externe LM Studio-host
 export LLM_MODEL=qwen/qwen3-8b
 export LMSTUDIO_HOST=192.168.2.27:1234   # LM Studio op een andere machine (bv. een Mac)
 ```
