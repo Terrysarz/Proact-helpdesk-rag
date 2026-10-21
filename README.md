@@ -100,7 +100,10 @@ tot Adobe?* en *Verwijder Adobe weer*.
 ## Instellingen (omgevingsvariabelen)
 
 Ik zet gevoelige gegevens als omgevingsvariabelen, nooit in de broncode. Deze staan
-bij mij in een `ad.env`-bestand dat buiten Git blijft (`.gitignore`). Voorbeeld:
+bij mij in een `ad.env`-bestand dat buiten Git blijft (`.gitignore`). De AD- en
+e-mailvariabelen zijn optioneel voor de applicatie (zonder deze draait alles in
+simulatie), maar in mijn PoC heb ik ze wel ingesteld zodat de resets en mails echt
+werken. Voorbeeld:
 
 ```bash
 # On-prem Active Directory (LDAPS)
