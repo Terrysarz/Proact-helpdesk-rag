@@ -128,9 +128,6 @@ logje van het verwijder-script staat in `C:\Windows\Temp\Uninstall-AdobeReader.l
 
 ## Problemen die ik ben tegengekomen en hoe ik ze heb opgelost
 
-- **RDP werkte niet (poort 3389 geweigerd).** Opgelost met `Fix-RDP.ps1` op de server
-  via de Proxmox-console: Remote Desktop en de firewall (`@FirewallAPI.dll,-28752`)
-  aangezet en de `TermService` herstart.
 - **Windows 11-setup eiste een Microsoft-account.** Omzeild met `Shift+F10` en
   `start ms-cxh:localonly` voor een lokaal account. Op een Mac-toetsenbord is dat
   `Fn+Shift+F10`.

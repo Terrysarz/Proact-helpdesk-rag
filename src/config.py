@@ -26,9 +26,26 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text-v1.5")
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
 TOP_K = 3
-MIN_SCORE = 0.35
+# Relevantiedrempels voor de kennisbank (cosine-score van de bovenste hit). Gemeten met het
+# huidige embedding-model: echte vragen scoren 0.67 tot 0.86, vragen buiten het onderwerp 0.62 tot 0.71.
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.66"))     # eronder: direct "niet in de kennisbank"
+SURE_SCORE = float(os.getenv("SURE_SCORE", "0.75"))   # erboven: zeker genoeg, direct antwoorden
+# Daartussen vraagt de bot het model of de vraag over IT-hulp op het werk gaat.
+LLM_RELEVANCE = os.getenv("LLM_RELEVANCE", "true").lower() == "true"
 MAX_TOKENS = 400
 HISTORY_MAX = 8          # hoeveel berichten (user+assistant) we onthouden per sessie
+
+# --- Verwoording van antwoorden op acties -----------------------------------
+# Het taalmodel mag de vaste uitkomst-teksten (ticket, reset, software) in eigen woorden
+# zeggen, met de voornaam erbij. De feiten blijven uit de code komen; bij twijfel geldt de
+# vaste tekst. Zet op "false" om alleen de vaste teksten te gebruiken.
+LLM_PHRASING = os.getenv("LLM_PHRASING", "true").lower() == "true"
+LLM_PHRASING_TIMEOUT = float(os.getenv("LLM_PHRASING_TIMEOUT", "20"))   # seconden
+# Het taalmodel leest ook korte antwoorden als "ja hoor, doe maar" of "nee, liever anders".
+# Korte modelaanroepen (bedoeling lezen, ja/nee, relevantie): na zoveel seconden valt de bot terug
+# op de trefwoord-methode, zodat een slapende of uitgezette LM Studio niets blokkeert.
+LLM_QUICK_TIMEOUT = float(os.getenv("LLM_QUICK_TIMEOUT", "15"))
+LLM_READ_REPLIES = os.getenv("LLM_READ_REPLIES", "true").lower() == "true"
 
 # --- Acties / simulatie -----------------------------------------------------
 EMAIL_DOMAIN = "proact.nl"
@@ -51,15 +68,6 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "servicedesk@proact.nl")
 SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
 EMAIL_ENABLED = bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
-
-# --- Microsoft Graph / Entra ID (optioneel) ---------------------------------
-# Vul als omgevingsvariabelen. Als deze leeg zijn, wordt Graph niet gebruikt.
-#   export GRAPH_TENANT_ID=...      export GRAPH_CLIENT_ID=...
-#   export GRAPH_CLIENT_SECRET=...  export GRAPH_SENDER=servicedesk@jouwtenant.onmicrosoft.com
-GRAPH_TENANT_ID = os.getenv("GRAPH_TENANT_ID", "")
-GRAPH_CLIENT_ID = os.getenv("GRAPH_CLIENT_ID", "")
-GRAPH_CLIENT_SECRET = os.getenv("GRAPH_CLIENT_SECRET", "")
-GRAPH_SENDER = os.getenv("GRAPH_SENDER", "")
 
 # --- On-prem Active Directory (optioneel) -----------------------------------
 # Zie de output van scripts/02-Setup-Lab.ps1 voor de juiste waarden.

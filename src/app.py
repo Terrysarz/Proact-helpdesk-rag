@@ -8,8 +8,12 @@ v3: strakkere (Claude-achtige) interface + gespreksgeheugen.
 
 from __future__ import annotations
 import json
+import os
+import secrets
+import time
 
-from flask import Flask, request, Response, render_template_string, stream_with_context, jsonify
+from flask import (Flask, request, Response, render_template_string, stream_with_context,
+                   jsonify, make_response)
 
 from rag import prepare, remember
 from lmclient import ask_llm_stream
@@ -19,6 +23,64 @@ import ad
 app = Flask(__name__)
 SESSIONS: dict[str, dict] = {}
 
+# --- Sessies ---------------------------------------------------------------
+# Het sessie-ID wordt door de SERVER gemaakt en in een HttpOnly-cookie bewaard. Een
+# door de browser opgegeven ID wordt nooit overgenomen, zodat niemand een andere
+# sessie (en dus een ingelogde AD-gebruiker) kan overnemen door een ID te raden.
+SESSION_COOKIE = "sd_sid"
+SESSION_TTL = 8 * 3600        # seconden inactiviteit voordat een sessie vervalt
+MAX_SESSIONS = 500
+
+# --- Login-beperking (tegen brute force en het vergrendelen van AD-accounts) ----
+LOGIN_MAX_FAILS = 5
+LOGIN_WINDOW = 300            # seconden
+_LOGIN_FAILS: dict[str, list[float]] = {}
+
+
+def _prune_sessions() -> None:
+    now = time.time()
+    for sid in [k for k, v in SESSIONS.items() if now - v.get("_seen", now) > SESSION_TTL]:
+        del SESSIONS[sid]
+    if len(SESSIONS) > MAX_SESSIONS:
+        oldest = sorted(SESSIONS, key=lambda k: SESSIONS[k].get("_seen", 0))
+        for sid in oldest[: len(SESSIONS) - MAX_SESSIONS]:
+            del SESSIONS[sid]
+
+
+def get_session() -> tuple[str, dict]:
+    """Geeft (sid, sessie) voor dit verzoek. Onbekend of ontbrekend ID -> nieuwe sessie."""
+    sid = request.cookies.get(SESSION_COOKIE, "")
+    if sid not in SESSIONS:
+        _prune_sessions()
+        sid = secrets.token_urlsafe(32)
+        SESSIONS[sid] = {}
+    SESSIONS[sid]["_seen"] = time.time()
+    return sid, SESSIONS[sid]
+
+
+def with_cookie(resp, sid: str):
+    resp.set_cookie(SESSION_COOKIE, sid, httponly=True, samesite="Lax", max_age=SESSION_TTL)
+    return resp
+
+
+def _fails(key: str) -> list[float]:
+    now = time.time()
+    recent = [t for t in _LOGIN_FAILS.get(key, []) if now - t < LOGIN_WINDOW]
+    if recent:
+        _LOGIN_FAILS[key] = recent
+    else:
+        _LOGIN_FAILS.pop(key, None)
+    return recent
+
+
+def _login_blocked(*keys: str) -> bool:
+    return any(len(_fails(k)) >= LOGIN_MAX_FAILS for k in keys)
+
+
+def _login_failed(*keys: str) -> None:
+    for k in keys:
+        _LOGIN_FAILS.setdefault(k, []).append(time.time())
+
 
 def sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -26,7 +88,8 @@ def sse(payload: dict) -> str:
 
 @app.route("/")
 def home():
-    return render_template_string(PAGE)
+    sid, _ = get_session()
+    return with_cookie(make_response(render_template_string(PAGE)), sid)
 
 
 @app.route("/login", methods=["POST"])
@@ -34,52 +97,63 @@ def login():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
-    session_id = (data.get("session_id") or "default").strip()
-    session = SESSIONS.setdefault(session_id, {})
+    sid, session = get_session()
+    ip_key, user_key = f"ip:{request.remote_addr}", f"user:{username.lower()}"
 
     if not ad.enabled():
-        return jsonify({"ok": False, "error": "Inloggen is niet beschikbaar (AD niet geconfigureerd)."})
+        return with_cookie(jsonify({"ok": False, "error": "Inloggen is niet beschikbaar (AD niet geconfigureerd)."}), sid)
+    if _login_blocked(ip_key, user_key):
+        return with_cookie(jsonify({"ok": False, "error": "Te veel mislukte pogingen. "
+                                                          "Probeer het over enkele minuten opnieuw."}), sid)
     try:
         user = ad.authenticate(username, password)
     except Exception:
-        return jsonify({"ok": False, "error": "Kan de AD-server niet bereiken."})
+        return with_cookie(jsonify({"ok": False, "error": "Kan de AD-server niet bereiken."}), sid)
     if not user:
-        return jsonify({"ok": False, "error": "Onjuiste gebruikersnaam of wachtwoord."})
+        _login_failed(ip_key, user_key)
+        return with_cookie(jsonify({"ok": False, "error": "Onjuiste gebruikersnaam of wachtwoord."}), sid)
+
+    # Gelukt: teller leeg en een nieuw sessie-ID (voorkomt session fixation).
+    _LOGIN_FAILS.pop(ip_key, None)
+    _LOGIN_FAILS.pop(user_key, None)
+    new_sid = secrets.token_urlsafe(32)
+    SESSIONS[new_sid] = SESSIONS.pop(sid)
+    sid = new_sid
 
     is_agent = (user.get("sam", "").lower() in config.AD_AGENTS)
+    full = user.get("name", "")
+    first = user.get("first") or (full.split()[0] if full else "")
     session["auth"] = {
-        "sam": user.get("sam", ""), "name": user.get("name", ""),
+        "sam": user.get("sam", ""), "name": full, "first": first,
         "company": user.get("company", ""), "mail": user.get("mail", ""),
         "is_agent": is_agent,
     }
-    return jsonify({"ok": True, "name": user.get("name") or user.get("sam"), "agent": is_agent})
+    return with_cookie(jsonify({"ok": True, "name": user.get("name") or user.get("sam"),
+                                "first": first, "agent": is_agent}), sid)
 
 
 @app.route("/logout", methods=["POST"])
 def logout():
-    data = request.get_json(force=True, silent=True) or {}
-    s = SESSIONS.get((data.get("session_id") or "default").strip())
-    if s:
-        s.pop("auth", None)
-    return jsonify({"ok": True})
+    sid, s = get_session()
+    s.pop("auth", None)
+    return with_cookie(jsonify({"ok": True}), sid)
 
 
 @app.route("/me", methods=["POST"])
 def me():
-    data = request.get_json(force=True, silent=True) or {}
-    s = SESSIONS.get((data.get("session_id") or "default").strip(), {})
+    sid, s = get_session()
     a = s.get("auth")
     if a:
-        return jsonify({"loggedin": True, "name": a.get("name") or a.get("sam"), "agent": a.get("is_agent")})
-    return jsonify({"loggedin": False, "login_available": ad.enabled()})
+        return with_cookie(jsonify({"loggedin": True, "name": a.get("name") or a.get("sam"),
+                                    "first": a.get("first", ""), "agent": a.get("is_agent")}), sid)
+    return with_cookie(jsonify({"loggedin": False, "login_available": ad.enabled()}), sid)
 
 
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(force=True, silent=True) or {}
     question = (data.get("question") or "").strip()
-    session_id = (data.get("session_id") or "default").strip()
-    session = SESSIONS.setdefault(session_id, {})
+    sid, session = get_session()
 
     def generate():
         if not question:
@@ -118,6 +192,13 @@ def chat():
                                                         "Is het antwoordmodel geladen in LM Studio?"})
                     yield sse({"type": "done"})
                     return
+                note = "\n\n(Het antwoord werd onderbroken. Stel je vraag gerust opnieuw.)"
+                reply_text += note
+                yield sse({"type": "token", "text": note})
+            if plan.get("followup"):        # vaste vervolgvraag, bv. "wil je dat ik het reset?"
+                extra = "\n\n" + plan["followup"]
+                reply_text += extra
+                yield sse({"type": "token", "text": extra})
             # Interne bronbestanden (bv. 02-outlook.md) tonen we NIET aan de klant.
             # De nette, publieke 'Meer info'-link hieronder blijft wel staan.
             if plan.get("links"):
@@ -130,7 +211,8 @@ def chat():
         yield sse({"type": "done"})
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    return Response(stream_with_context(generate()), mimetype="text/event-stream", headers=headers)
+    return with_cookie(Response(stream_with_context(generate()), mimetype="text/event-stream",
+                                headers=headers), sid)
 
 
 PAGE = r"""
@@ -220,7 +302,7 @@ PAGE = r"""
   </div>
   <div id="scroll"><div id="chat">
     <div class="row bot"><div class="who">Assistent</div>
-      <div class="bubble">Hoi! Vraag me iets over wachtwoorden, MFA, VPN, licenties, printers of onboarding — of laat me een wachtwoordreset starten of een ticket aanmaken.</div>
+      <div class="bubble" id="welcome">Hoi! Vraag me iets over wachtwoorden, MFA, VPN, licenties, printers of onboarding, of laat me een wachtwoordreset starten of een ticket aanmaken.</div>
     </div>
   </div></div>
   <footer>
@@ -238,9 +320,6 @@ const scroll = document.getElementById('scroll');
 const chat = document.getElementById('chat');
 const input = document.getElementById('q');
 const sendBtn = document.getElementById('send');
-
-let sessionId = localStorage.getItem('sd_session');
-if (!sessionId){ sessionId = 'sess-' + Math.random().toString(36).slice(2); localStorage.setItem('sd_session', sessionId); }
 
 function esc(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function fmt(t){
@@ -282,7 +361,7 @@ async function submit(){
 
   try{
     const res = await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:q, session_id:sessionId})});
+      body:JSON.stringify({question:q})});
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf='';
     while(true){
       const {value,done} = await reader.read(); if(done) break;
@@ -325,21 +404,27 @@ const loginmsg=document.getElementById('loginmsg');
 
 async function post(url, body){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(Object.assign({session_id:sessionId}, body||{}))});
+    body:JSON.stringify(body||{})});
   return r.json();
 }
-function showLoggedIn(name, agent){
+const WELCOME = "Vraag me iets over wachtwoorden, MFA, VPN, licenties, printers of onboarding, of laat me een wachtwoordreset starten of een ticket aanmaken.";
+function setWelcome(first){
+  document.getElementById('welcome').textContent = (first ? 'Hoi ' + first : 'Hoi') + '! ' + WELCOME;
+}
+function showLoggedIn(name, agent, first){
+  setWelcome(first);
   loginform.style.display='none'; loggedin.style.display='block';
   document.getElementById('whoami').textContent=name;
   document.getElementById('agentbadge').innerHTML = agent ? '<span class="agentbadge">agent</span>' : '';
   authbar.style.display='flex';
 }
 function showLoginForm(){
+  setWelcome('');
   loggedin.style.display='none'; loginform.style.display='flex'; authbar.style.display='flex';
 }
 async function refreshAuth(){
   const d=await post('/me');
-  if(d.loggedin){ showLoggedIn(d.name, d.agent); }
+  if(d.loggedin){ showLoggedIn(d.name, d.agent, d.first); }
   else if(d.login_available){ showLoginForm(); }
   else { authbar.style.display='none'; }   // AD niet geconfigureerd -> geen inlogbalk
 }
@@ -348,7 +433,7 @@ loginform.addEventListener('submit', async (e)=>{
   const u=document.getElementById('u').value.trim();
   const p=document.getElementById('p').value;
   const d=await post('/login',{username:u, password:p});
-  if(d.ok){ document.getElementById('p').value=''; showLoggedIn(d.name, d.agent); }
+  if(d.ok){ document.getElementById('p').value=''; showLoggedIn(d.name, d.agent, d.first); }
   else { loginmsg.textContent = d.error || 'Inloggen mislukt'; }
 });
 document.getElementById('logout').addEventListener('click', async (e)=>{
@@ -362,4 +447,9 @@ refreshAuth();
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    port = int(os.getenv("PORT", "5000"))
+    try:
+        from waitress import serve          # productieserver; ondersteunt de streaming-antwoorden
+        serve(app, host="0.0.0.0", port=port, threads=8)
+    except ImportError:                      # zonder waitress: de ingebouwde Flask-server
+        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

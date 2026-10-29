@@ -19,6 +19,10 @@ ongeveer 15 minuten en probeer het daarna opnieuw.
 3. Kies "Aanmeldingsmethode toevoegen" en volg de stappen om de app te koppelen.
 4. Bevestig de testmelding op je telefoon.
 
+## Melding "meer informatie vereist"
+Zie je deze melding bij het aanmelden, dan is je MFA-registratie nog niet afgerond.
+Doorloop de stappen hierboven op aka.ms/mfasetup en probeer het daarna opnieuw.
+
 ## Nieuwe telefoon of geen toegang meer tot je tweede stap
 Heb je geen toegang meer tot je eerder ingestelde verificatiemethode, dan kan de
 Service Desk je hierbij helpen na een korte identiteitscontrole.

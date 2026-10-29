@@ -11,11 +11,13 @@ from __future__ import annotations
 import os
 import re
 import math
+import functools
+import concurrent.futures
 from typing import Iterator, Sequence
 
 import lmstudio as lms
 
-from config import LLM_MODEL, EMBEDDING_MODEL, MAX_TOKENS, SYSTEM_PROMPT
+from config import LLM_MODEL, EMBEDDING_MODEL, MAX_TOKENS, SYSTEM_PROMPT, LLM_QUICK_TIMEOUT
 
 # --- Waar draait LM Studio? --------------------------------------------------
 # Leeg  -> lokaal op deze machine (localhost:1234, standaard).
@@ -30,6 +32,23 @@ if _LMS_HOST:
 
 _llm = None
 _embedder = None
+
+# Korte aanroepen krijgen een time-out. Bij een fout of time-out geven ze `fallback` terug; de
+# aanroeper gebruikt dan de eenvoudige trefwoord-methode.
+_QUICK_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm-quick")
+
+
+def _quick(fallback):
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            future = _QUICK_POOL.submit(fn, *args, **kwargs)
+            try:
+                return future.result(timeout=LLM_QUICK_TIMEOUT)
+            except Exception:
+                return fallback
+        return wrapper
+    return decorator
 
 
 def get_llm():
@@ -141,6 +160,7 @@ def ask_llm_stream(user_prompt: str) -> Iterator[str]:
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
+@_quick(None)
 def parse_software_intent(message: str, history: list[dict] | None = None,
                           apps: list[str] | None = None) -> dict | None:
     """Laat het LLM LEZEN wat de gebruiker met werkplek-software wil, i.p.v. trefwoorden te
@@ -192,11 +212,116 @@ def parse_software_intent(message: str, history: list[dict] | None = None,
     return {"intent": intent, "app": app, "for_self": bool(for_self)}
 
 
+@_quick(None)
+def is_it_question(message: str) -> bool | None:
+    """Gaat de vraag over IT-hulp op een werkplek (Microsoft 365, wachtwoord, VPN, printer, ...)?
+    True/False, of None als het model niet antwoordt (dan beslist de aanroeper zelf)."""
+    prompt = (
+        "Je bent de helpdesk van een IT-bedrijf. Gaat de vraag hieronder over IT-hulp voor een "
+        "werkplek, zoals Microsoft 365, Outlook, Teams, OneDrive, wachtwoord, MFA, VPN, printer, "
+        "software, licenties of beveiliging?\n"
+        f'Vraag: "{message.strip()}"\n'
+        'Antwoord UITSLUITEND met EEN regel JSON: {"it":"ja"} of {"it":"nee"}\n\n/no_think'
+    )
+    try:
+        chat = lms.Chat("Je beoordeelt vragen en antwoordt alleen met JSON.")
+        chat.add_user_message(prompt)
+        result = get_llm().respond(chat, config={"maxTokens": 20})
+        text = _clean(getattr(result, "content", ""))
+    except Exception:
+        return None
+    m = _JSON_RE.search(text)
+    if not m:
+        return None
+    import json as _json
+    try:
+        value = str(_json.loads(m.group(0)).get("it", "")).strip().lower()
+    except Exception:
+        return None
+    return True if value == "ja" else False if value == "nee" else None
+
+
+@_quick(None)
+def parse_delegation(message: str, history: list[dict] | None) -> str | None:
+    """Laat het LLM lezen of de klant de assistent iets laat DOEN, ook als het bericht alleen
+    naar het gesprek verwijst ("kan jij het voor me veranderen"). Geeft "password_reset",
+    "ticket", "software" of "none", of None als het niet lukt."""
+    lines = []
+    for m in (history or [])[-4:]:
+        who = "Klant" if m.get("role") == "user" else "Assistent"
+        content = (m.get("content") or "").strip()
+        if content:
+            lines.append(f"{who}: {content[:400]}")
+    prompt = (
+        "Een klant praat met een helpdesk-assistent. Lees het gesprek en het LAATSTE bericht van "
+        "de klant. Vraagt de klant in dat laatste bericht dat de assistent zelf iets uitvoert?\n"
+        '- "password_reset": de assistent moet het wachtwoord van de klant resetten of wijzigen '
+        '(ook als het bericht alleen "het" of "dit" zegt en het over een wachtwoord ging).\n'
+        '- "ticket": de assistent moet een ticket aanmaken.\n'
+        '- "software": de assistent moet software installeren, verwijderen of controleren.\n'
+        '- "none": de klant stelt een vraag, beschrijft een probleem of vraagt om uitleg.\n'
+        'Antwoord UITSLUITEND met EEN regel JSON: {"actie":"password_reset|ticket|software|none"}\n\n'
+        f"Gesprek:\n{chr(10).join(lines)}\n\nLaatste bericht van de klant: {message.strip()}\n\n/no_think"
+    )
+    try:
+        chat = lms.Chat("Je classificeert berichten en antwoordt alleen met JSON.")
+        chat.add_user_message(prompt)
+        result = get_llm().respond(chat, config={"maxTokens": 40})
+        text = _clean(getattr(result, "content", ""))
+    except Exception:
+        return None
+    m = _JSON_RE.search(text)
+    if not m:
+        return None
+    import json as _json
+    try:
+        value = str(_json.loads(m.group(0)).get("actie", "")).strip().lower()
+    except Exception:
+        return None
+    return value if value in ("password_reset", "ticket", "software", "none") else None
+
+
+@_quick(None)
+def parse_reply(message: str, question: str) -> str | None:
+    """Laat het LLM lezen hoe de gebruiker reageert op een vraag van de assistent.
+    Geeft "yes", "no", "adjust" of "other" terug, of None als het niet lukt (dan valt de
+    aanroeper terug op de woordenlijst)."""
+    prompt = (
+        f'De assistent vroeg: "{question.strip()}"\n'
+        f'De gebruiker antwoordt: "{message.strip()}"\n\n'
+        "Kies precies EEN:\n"
+        '- "yes": de gebruiker stemt duidelijk in.\n'
+        '- "no": de gebruiker wil het niet of wil stoppen.\n'
+        '- "adjust": de gebruiker wil iets aanpassen of vindt het niet kloppen.\n'
+        '- "other": het is geen antwoord op de vraag (bijvoorbeeld een nieuwe vraag of een '
+        "beschrijving van een probleem).\n"
+        'Antwoord UITSLUITEND met EEN regel JSON: {"antwoord":"yes|no|adjust|other"}\n\n/no_think'
+    )
+    try:
+        chat = lms.Chat("Je classificeert antwoorden en antwoordt alleen met JSON.")
+        chat.add_user_message(prompt)
+        result = get_llm().respond(chat, config={"maxTokens": 40})
+        text = _clean(getattr(result, "content", ""))
+    except Exception:
+        return None
+    m = _JSON_RE.search(text)
+    if not m:
+        return None
+    import json as _json
+    try:
+        value = str(_json.loads(m.group(0)).get("antwoord", "")).strip().lower()
+    except Exception:
+        return None
+    return value if value in ("yes", "no", "adjust", "other") else None
+
+
 _SUBJECT_RE = re.compile(r"ONDERWERP:\s*(.+)", re.IGNORECASE)
 _DESC_RE = re.compile(r"OMSCHRIJVING:\s*(.+)", re.IGNORECASE | re.DOTALL)
 
 
-def summarize_ticket(history: list[dict], request_msg: str = "") -> tuple[str, str]:
+@_quick(("", ""))
+def summarize_ticket(history: list[dict], request_msg: str = "",
+                     correction: bool = False) -> tuple[str, str]:
     """Laat het LLM het probleem van de gebruiker uit het GESPREK samenvatten tot een
     kort ticketonderwerp + een korte omschrijving. Zo hoeft de klant zich niet te
     herhalen en hoeven we geen trefwoorden te raden. Geeft ("", "") terug bij twijfel,
@@ -209,11 +334,17 @@ def summarize_ticket(history: list[dict], request_msg: str = "") -> tuple[str, s
         if content:
             lines.append(f"{who}: {content}")
     transcript = "\n".join(lines) if lines else (request_msg or "")
+    if correction:      # alleen het bericht van de gebruiker zelf, niet het eerdere gesprek
+        transcript = request_msg or ""
     if not transcript.strip():
         return "", ""
+    intro = ("De gebruiker corrigeert het voorgestelde ticketonderwerp. Haal uit het bericht waar "
+             "het ticket over moet gaan en negeer correctiewoorden zoals 'nee' of 'dat klopt niet'. "
+             "Vat het samen voor een ticket. " if correction else
+             "Vat het PROBLEEM VAN DE GEBRUIKER samen voor een ticket. ")
     prompt = (
         "Hieronder staat een gesprek tussen een gebruiker en een IT-helpdesk. "
-        "Vat het PROBLEEM VAN DE GEBRUIKER samen voor een ticket. "
+        f"{intro}"
         "Baseer je alleen op het gesprek; verzin niets.\n"
         "Antwoord in het Nederlands, EXACT in dit formaat en zonder extra tekst:\n"
         "ONDERWERP: <korte titel, maximaal 8 woorden>\n"

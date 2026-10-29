@@ -53,14 +53,16 @@ def _connect():
 def find_user(identifier: str) -> dict | None:
     """Zoekt een gebruiker op userPrincipalName of sAMAccountName. None als niet gevonden."""
     from ldap3 import SUBTREE
+    from ldap3.utils.conv import escape_filter_chars
     sam = identifier.split("@")[0] if "@" in identifier else identifier
+    ident_f, sam_f = escape_filter_chars(identifier), escape_filter_chars(sam)
     conn = _connect()
     try:
         conn.search(AD_BASE_DN,
-                    f"(&(objectClass=user)(|(userPrincipalName={identifier})(sAMAccountName={sam})))",
+                    f"(&(objectClass=user)(|(userPrincipalName={ident_f})(sAMAccountName={sam_f})))",
                     search_scope=SUBTREE,
                     attributes=["distinguishedName", "userPrincipalName", "sAMAccountName",
-                                "mail", "displayName", "cn", "company"])
+                                "mail", "displayName", "givenName", "cn", "company"])
         if not conn.entries:
             return None
         e = conn.entries[0]
@@ -72,6 +74,7 @@ def find_user(identifier: str) -> dict | None:
             "upn": val("userPrincipalName"),
             "mail": val("mail"),
             "name": val("displayName") or val("cn"),
+            "first": val("givenName"),
             "company": val("company"),
         }
     finally:
@@ -123,11 +126,13 @@ def find_group(name: str) -> dict | None:
     """Zoekt een (security-)groep op cn of sAMAccountName. None als niet gevonden.
     Geeft dn + huidige leden terug (DN's), zodat de aanroeper dubbel lidmaatschap kan zien."""
     from ldap3 import SUBTREE
+    from ldap3.utils.conv import escape_filter_chars
     cn = name.split("@")[0] if "@" in name else name
+    cn_f = escape_filter_chars(cn)
     conn = _connect()
     try:
         conn.search(AD_BASE_DN,
-                    f"(&(objectClass=group)(|(cn={cn})(sAMAccountName={cn})))",
+                    f"(&(objectClass=group)(|(cn={cn_f})(sAMAccountName={cn_f})))",
                     search_scope=SUBTREE,
                     attributes=["distinguishedName", "cn", "member"])
         if not conn.entries:
@@ -177,7 +182,7 @@ def reset_to_temp(dn: str) -> str:
     """
     Zet een tijdelijk wachtwoord én 'moet wijzigen bij volgende aanmelding'.
     Vereist LDAPS. Geeft het tijdelijke wachtwoord terug, zodat de aanroeper het
-    VEILIG kan leveren (bv. one-time link of e-mail) — nooit in de chat.
+    VEILIG kan leveren (bv. one-time link of e-mail), nooit in de chat.
     """
     from ldap3 import MODIFY_REPLACE
     temp = _gen_password()

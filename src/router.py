@@ -14,6 +14,7 @@ Intents:
 
 from __future__ import annotations
 import re
+import difflib
 
 GREETINGS = {
     "hoi", "hi", "hallo", "hey", "hee", "yo", "goedemorgen", "goedemiddag",
@@ -27,12 +28,27 @@ _REQUEST_CUES = (
     "start een", "stuur mij", "stuur me", "mijn wachtwoord resetten",
     "wachtwoord resetten voor", "regel een", "ik wil", "installeer",
     "ik heb nodig", "heb ik nodig",
+    "kun je dat", "kan je dat", "kun jij", "kan jij", "kunnen jullie", "kunt u", "zou je",
 )
 
 # Vraagwoorden wijzen op een uitlegvraag -> RAG, niet op een actie.
 _QUESTION_CUES = ("hoe ", "waar ", "wat ", "waarom ", "wanneer ", "welke ", "kan ik ", "mag ik ")
 
 _PW_WORDS = ("wachtwoord", "password", "inloggen", "aanmelden")
+# "Ik ben mijn wachtwoord vergeten" / "ik wil mijn wachtwoord aanpassen": geen kale opdracht,
+# maar wel een duidelijke wens om te resetten. De bot vraagt dan eerst of hij het mag doen.
+_PW_FORGOT = ("vergeten", "kwijt", "weet ik niet", "weet het niet", "geblokkeerd", "vergrendeld", "verlopen")
+_PW_CHANGE = ("wijzigen", "wijzig", "aanpassen", "veranderen", "aan te passen", "te veranderen", "te wijzigen")
+# Bericht dat naar het gesprek verwijst en de assistent iets laat DOEN ("kan jij het voor me ...").
+_DELEGATION_CUES = ("voor me", "voor mij", "jij het", "jij dit", "doe het", "doe maar", "regel het",
+                    "ik wil dat jij", "kan jij", "kun jij", "kun je het", "kan je het", "kun je dit", "kan je dit")
+
+
+def is_delegation(text: str) -> bool:
+    t = _normalize(text)
+    return _looks_like_request(t) or any(cue in t for cue in _DELEGATION_CUES)
+
+
 _PW_RESET_WORDS = ("reset", "resetten", "vergeten", "kwijt", "opnieuw", "nieuw", "geblokkeerd", "vastgelopen")
 _TICKET_WORDS = ("ticket", "melding", "storing", "incident", "aanvraag")
 # Zelfservice software-uitrol (installeer/aanvragen van een applicatie).
@@ -67,13 +83,40 @@ def _normalize(text: str) -> str:
     return text.strip().lower()
 
 
+_THANKS = ("bedankt", "dankjewel", "dankje", "dank je", "dankuwel", "thanks", "thx", "thank you", "tnx")
+_BYE = ("doei", "doeg", "tot ziens", "tot later", "tot snel", "bye", "houdoe", "fijne dag", "fijne avond")
+
+
+def is_noise(text: str) -> bool:
+    """Alleen leestekens of een enkel teken: geen inhoud om op te antwoorden."""
+    return len(re.findall(r"[^\W\d_]", text)) < 2 and not re.search(r"\d", text)
+
+
+def is_thanks(text: str) -> bool:
+    t = _normalize(text)
+    return len(t.split()) <= 5 and any(w in t for w in _THANKS)
+
+
+def is_bye(text: str) -> bool:
+    t = _normalize(text)
+    return len(t.split()) <= 5 and any(w in t for w in _BYE)
+
+
 def is_greeting(text: str) -> bool:
     t = _normalize(text).strip("!?. ")
     if not t:
         return False
     # Alleen als het hele bericht een korte groet is (max 3 woorden, bevat een groet).
     words = t.split()
-    return len(words) <= 3 and any(w.strip(",.!?") in GREETINGS for w in words)
+    if len(words) > 3:
+        return False
+    for w in (x.strip(",.!?") for x in words):
+        if w in GREETINGS:
+            return True
+        # Typfout in een groet ("hellop", "hoii", "goedemorgn")
+        if len(w) >= 4 and difflib.get_close_matches(w, GREETINGS, n=1, cutoff=0.8):
+            return True
+    return False
 
 
 def _looks_like_request(text: str) -> bool:
@@ -127,11 +170,22 @@ def classify(text: str) -> str:
     if not t:
         return "question"
 
+    if is_noise(t):
+        return "noise"
+
     if is_greeting(t):
         return "greeting"
 
+    if is_thanks(t):
+        return "thanks"
+
+    if is_bye(t):
+        return "bye"
+
     is_question_phrasing = any(t.startswith(c) or (" " + c) in (" " + t) for c in _QUESTION_CUES)
     request = _looks_like_request(t)
+    # "wil mijn wachtwoord NIET resetten": een ontkenning is geen verzoek om te resetten.
+    negated_reset = bool(re.search(r"\b(niet|geen)\s+(\w+\s+)?(reset|resetten)\b", t))
 
     # Software: eerst LEZEN wat de gebruiker wil, dan pas routeren.
     software_ctx = any(w in t for w in _SOFTWARE_WORDS)
@@ -151,8 +205,17 @@ def classify(text: str) -> str:
 
     # Wachtwoordreset: alleen als ACTIE bedoeld (verzoek), niet als uitlegvraag.
     if any(w in t for w in _PW_WORDS) and any(w in t for w in _PW_RESET_WORDS):
-        if request and not is_question_phrasing:
+        if request and not is_question_phrasing and not negated_reset:
             return "password_reset"
+
+    # Wachtwoord vergeten of wijzigen als WENS: de bot biedt de reset aan en vraagt om bevestiging.
+    pw_strict = "wachtwoord" in t or "password" in t
+    if pw_strict and not negated_reset:
+        starts_q = any(t.startswith(c) for c in _QUESTION_CUES)
+        if any(w in t for w in _PW_FORGOT) and not starts_q:
+            return "password_forgot"
+        if any(w in t for w in _PW_CHANGE) and request and not is_question_phrasing:
+            return "password_forgot"
 
     # Ticket aanmaken: verzoek + ticketwoord.
     if any(w in t for w in _TICKET_WORDS) and (request or "ticket" in t) and not is_question_phrasing:
